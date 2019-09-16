@@ -20,7 +20,7 @@ enum TblState {
 }
 
 // class Deroffer:
-struct Deroffer {
+pub struct Deroffer {
     g_re_word: &'static Regex,
     g_re_number: &'static Regex,
     g_re_not_backslash_or_whitespace: &'static Regex,
@@ -42,14 +42,14 @@ struct Deroffer {
     tblstate: TblState,
     tblTab: String,
     eqn: bool,
-    output: Vec<TODO_TYPE>,
+    output: Vec<Vec<TODO_TYPE>>,
     name: String,
 
     s: String, // This is not explicitly defined in python code
 }
 
 impl Deroffer {
-    fn new() -> Deroffer {
+    pub fn new() -> Deroffer {
         Deroffer {
             g_re_word: crate::regex!(r##"[a-zA-Z_]+"##),
             g_re_number: crate::regex!(r##"[+-]?\d+"##),
@@ -85,10 +85,20 @@ impl Deroffer {
         }
     }
 
-    fn get_output(&self, output: &[u8]) -> Result<String, String> {
+    fn get_output_(&self, output: &[u8]) -> Result<String, String> {
         let s = String::from_utf8(output.into())
             .map_err(|err| format!("Bad bad bad (bad utf8)! {}", err))?;
         Ok(self.g_re_newline_collapse.replace_all(&s, "\n").into())
+    }
+
+    pub fn get_output(&self) -> Result<String, String> {
+        let joined: Vec<u8> = self
+            .output
+            .iter()
+            .flat_map(std::convert::identity)
+            .cloned()
+            .collect();
+        self.get_output_(&joined)
     }
 
     // for the moment, return small strings, until we figure out what
@@ -548,7 +558,7 @@ impl Deroffer {
             .unwrap_or_default()
     }
 
-    fn deroff(&mut self, string: String) {
+    pub fn deroff(&mut self, string: String) {
         unimplemented!()
     }
 
@@ -581,8 +591,8 @@ fn deroff_files(files: &[String]) -> std::io::Result<()> {
 #[test]
 fn test_get_output() {
     let deroffer = Deroffer::new();
-    assert_eq!(&deroffer.get_output(b"foo\n\nbar").unwrap(), "foo\n\nbar");
-    assert_eq!(&deroffer.get_output(b"foo\n\n\nbar").unwrap(), "foo\nbar");
+    assert_eq!(&deroffer.get_output_(b"foo\n\nbar").unwrap(), "foo\n\nbar");
+    assert_eq!(&deroffer.get_output_(b"foo\n\n\nbar").unwrap(), "foo\nbar");
 }
 
 #[test]
