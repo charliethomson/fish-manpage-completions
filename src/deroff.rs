@@ -392,6 +392,60 @@ impl Deroffer {
         }
     }
 
+    fn text_arg<'a>(&mut self, s: &'a str) -> bool {
+        let mut s2 = s;
+        let mut got_something = false;
+        loop {
+            let possible = self.g_re_not_backslash_or_whitespace.find(s);
+            if let Some(m) = possible {
+                // Output the characters in the match
+                self.condputs(m.as_str());
+                s2 = self.skip_char(s2, Some(m.end()));
+                got_something = true;
+            }
+
+            if s2.is_empty() || Self::is_white(s2, 0) {
+                return got_something;
+            }
+
+            if !self.esc_char(s2) {
+                self.condputs(Self::str_at(s2, 0));
+                s2 = self.skip_char(s2, None);
+                got_something = true;
+            }
+        }
+    }
+
+    //     def text_arg(self):
+    //         # PCA: The deroff.c textArg() disallowed quotes at the start of an argument
+    //         # I'm not sure if this was a bug or not
+    //         got_something = False
+    //         while True:
+    //             match = Deroffer.g_re_not_backslash_or_whitespace.match(self.s)
+    //             if match:
+    //                 # Output the characters in the match
+    //                 self.condputs(match.group(0))
+    //                 self.skip_char(match.end(0))
+    //                 got_something = True
+    //
+    //             # Next is either an escape, or whitespace, or the end
+    //             # If it's the whitespace or the end, we're done
+    //             if not self.s or self.is_white(0):
+    //                 return got_something
+    //
+    //             # Try an escape
+    //             if not self.esc_char():
+    //                 # Some busted escape? Just output it
+    //                 self.condputs(self.str_at(0))
+    //                 self.skip_char()
+    //                 got_something = True
+
+    fn condputs<'a>(&self, s: &'a str) {}
+
+    fn esc_char<'a>(&self, s: &'a str) -> bool {
+        unimplemented!()
+    }
+
     // Replaces the g_macro_dict lookup in the Python code
     fn g_macro_dispatch(&mut self, s: &str) -> bool {
         match s {
