@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 
+use crate::util::{ maketrans, translate };
+
 type TODO_TYPE = u8;
 type TODO_NUMBER_TYPE = i8;
 
@@ -30,7 +32,7 @@ struct Deroffer {
     reg_table: HashMap<TODO_TYPE, TODO_TYPE>,
     tr_from: String,
     tr_to: String,
-    tr: String,
+    tr: Option<HashMap<u8, char>>,
     specletter: bool,
     refer: bool,
     r#macro: bool,
@@ -66,7 +68,7 @@ impl Deroffer {
             reg_table: HashMap::new(),
             tr_from: String::new(),
             tr_to: String::new(),
-            tr: String::new(),
+            tr: None,
             specletter: false,
             refer: false,
             r#macro: false,
@@ -538,6 +540,66 @@ impl Deroffer {
         unimplemented!()
     }
 
+    fn quoted_arg(&mut self) -> bool {
+        if Self::str_at(self.s.as_str(), 0) == "\"" {
+            self.s = self.skip_char(self.s.as_str(), None).to_owned();
+            while !self.s.is_empty() && Self::str_at(self.s.as_str(), 0) != "\"" {
+                if !self.esc_char() {
+                    if !self.s.is_empty() {
+                        self.condputs(Self::str_at(self.s.as_str(), 0).to_owned());
+                        self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+   
+    fn text_arg(&mut self) -> bool {
+        let mut got_something = false;
+        loop {
+            if let Some(m) = self.g_re_not_backslash_or_whitespace.find(self.s.clone().as_str()) {
+                self.condputs(m.as_str().to_owned());
+                self.s = self.skip_char(self.s.as_str(), Some(m.end())).to_owned();
+                got_something = true;
+            }
+
+            if self.s.is_empty() || Self::is_white(self.s.as_str(), 0) {
+                return got_something;
+            }
+
+            if !self.esc_char() {
+                self.condputs(Self::str_at(self.s.as_str(), 0).to_owned());
+                self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                got_something = true;
+            }
+        }
+    }
+
+    fn text_arg2(&mut self) -> bool {
+        if !self.esc_char() {
+            if !self.s.is_empty() && !Self::is_white(self.s.as_str(), 0) {
+                self.condputs(Self::str_at(self.s.as_str(), 0).to_owned());
+                self.s = self.skip_char(self.s.as_str(), None).to_owned();
+            } else {
+                return false;
+            }
+        }
+        loop {
+            if !self.esc_char() {
+                if !self.s.is_empty() && !Self::is_white(self.s.as_str(), 0) {
+                    self.condputs(Self::str_at(self.s.as_str(), 0).to_owned());
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                } else {
+                    return true;
+                }
+            }
+        }
+    }
+   
+
     fn not_whitespace(s: &str, idx: usize) -> bool {
         // # Note that this return False for the empty string (idx >= len(self.s))
         // ch = self.s[idx:idx+1]
@@ -548,8 +610,283 @@ impl Deroffer {
             .unwrap_or_default()
     }
 
-    fn deroff(&mut self, string: String) {
+    fn request_or_macro(&mut self) -> bool {
+        self.s = self.skip_char(self.s.as_str(), None).to_owned();
+        if let Some(c) = self.s.chars().nth(1) {
+            match c {
+                '"' => {
+                    if Self::str_at(self.s.as_str(), 1) == "\"" {
+                        self.condputs("\n".to_owned());
+                        return true;
+                    }
+                },
+                '[' => {
+                    self.refer = true;
+                    self.condputs("\n".to_owned());
+                    return true;
+                },
+                ']' => {
+                    self.refer = false;
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                    return self.text();
+                },
+                '.' => {
+
+                },
+                _ => (),
+            };
+        }
+
+        self.nobody = false;
+        let sf = self.s.get(0..2);
+
+        // TODO:
+        // let macro_func = Deroffer.g_macro_dict.get(sf, Deroffer.macro_other);
+        // if macro_func(self):
+        //      return true;
+        if self.nobody {
+            return true;
+        }
+
+        self.s = self.skip_leading_whitespace(self.s.as_str()).to_owned();
+        while !self.s.is_empty() && !Self::is_white(self.s.as_str(), 0) {
+            self.s = self.skip_char(self.s.as_str(), None).to_owned();
+        }
+
+        self.s = self.skip_leading_whitespace(self.s.as_str()).to_owned();
+
+        loop {
+            if !self.quoted_arg() && !self.text_arg() {
+                if !self.s.is_empty() {
+                    self.condputs(Self::str_at(self.s.as_str(), 0).to_owned());
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                } else {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn prch(&self, idx: usize) -> bool {
+        match self.s.get(idx..idx+1) {
+            Some("\t") | Some("\n") => false,
+            _ => true,
+        }
+    }
+
+    fn comment(&mut self) -> bool {
+        while !Self::str_at(self.s.as_str(), 0).is_empty() && Self::str_at(self.s.as_str(), 0) != "\n" {
+            self.s = self.skip_char(self.s.as_str(), None).to_owned();
+        }
+        true
+    }
+    
+    fn font(&mut self) -> bool {
+        if let Some(m) = self.g_re_font.find(self.s.as_str()) {
+            self.s = self.skip_char(self.s.as_str(), Some(m.end())).to_owned();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn font2(&mut self) -> bool {
+        if let Some("\\f") = self.s.get(0..2) {
+            let c = Self::str_at(self.s.as_str(), 2);
+
+            if c == "(" && self.prch(3) && self.prch(4) {
+                self.s = self.skip_char(self.s.as_str(), Some(5)).to_owned();
+                return true;
+            } else if c == "[" {
+                self.s = self.skip_char(self.s.as_str(), Some(2)).to_owned();
+                while self.prch(0) && Self::str_at(self.s.as_str(), 0) != "]" {
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                }
+                if Self::str_at(self.s.as_str(), 0) == "]" {
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                }
+            } else if self.prch(2) {
+                self.s = self.skip_char(self.s.as_str(), Some(3)).to_owned();
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    fn size(&self) -> bool {
         unimplemented!()
+    }
+    
+    fn numreq(&mut self) -> bool {
+        if ["h", "v", "w", "u", "d"].contains(&Self::str_at(self.s.as_str(), 1))
+        && Self::str_at(self.s.as_str(), 2) == "'" {
+            let mut m = self.r#macro as u8;
+            m += 1;
+            self.s = self.skip_char(self.s.as_str(), Some(3)).to_owned();
+            while self.esc_char() && Self::str_at(self.s.as_str(), 0) != "'" {
+                self.r#macro = m != 0;
+                return false;
+            }
+            if Self::str_at(self.s.as_str(), 0) == "'" {
+                self.s = self.skip_char(self.s.as_str(), None).to_owned();
+            }
+
+            m -= 1;
+            self.r#macro = m != 0;
+
+            return true
+        }
+
+        false
+    }
+    
+    fn var(&mut self) -> bool {
+        let mut reg = "";
+        if let Some(s0s1) = self.s.get(0..2) {
+            match s0s1 {
+                "\\n" => {
+                    if let Some("dy") = self.s.get(3..5) {
+                        self.s = self.skip_char(self.s.as_str(), Some(5)).to_owned();
+                        return true;
+                    } else if Self::str_at(self.s.as_str(), 2) == "(" && self.prch(3) && self.prch(4) {
+                        self.s = self.skip_char(self.s.as_str(), Some(5)).to_owned();
+                        return true;
+                    } else if Self::str_at(self.s.as_str(), 2) == "]" && self.prch(3) {
+                        self.s = self.skip_char(self.s.as_str(), Some(3)).to_owned();
+                        let mut s0 = Self::str_at(self.s.as_str(), 0);
+                        while !s0.is_empty() && s0 != "]" {
+                            self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                            s0 = Self::str_at(self.s.as_str(), 0);
+                        }
+                        return true;
+                    }
+                },
+                "\\*" => {
+                    if Self::str_at(self.s.as_str(), 2) == "(" && self.prch(3) && self.prch(4) {
+                        reg = self.s.get(3..5).expect("Index out of bounds");
+                        self.s = self.skip_char(self.s.as_str(), Some(5)).to_owned();
+                    } else if Self::str_at(self.s.as_str(), 2) == "[" && self.prch(3) {
+                        self.str_at("abc", 1);
+                    }
+                },
+                _ => ()
+            }
+        };
+
+        return false;
+    }
+    
+    fn spec(&self) -> bool {
+        unimplemented!()
+    }
+    
+    fn esc(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn esc_char_backslash(&mut self) -> bool {
+        if let Some(c) = self.s.chars().nth(1) {
+            match c {
+                '"'                         => return self.comment(),
+                'f'                         => return self.font(),
+                's'                         => return self.size(),
+                'h' | 'v' | 'w' | 'u' | 'd' => return self.numreq(),
+                'n' | '*'                   => return self.var(),
+                '('                         => return self.spec(),
+                _                           => return self.esc(),
+            }
+        } else {
+            return self.esc()
+        }
+    }
+
+    fn esc_char(&mut self) -> bool {
+        if let Some('\\') = self.s.chars().nth(0) {
+            return self.esc_char_backslash()
+        } else {
+            return self.word() || self.number()
+        }
+    }
+
+    // ATTN: This isnt in the original python,
+    // but it just cleans up an ugly if statement
+    // feel free to remove if you dont like it
+    fn is_special(&self) -> bool {
+        self.pic    || self.eqn     ||
+        self.refer  || self.r#macro ||
+        self.inlist || self.inheader
+    }
+
+    fn condputs(&mut self, s: String) {
+        if !self.is_special() {
+            if let Some(table) = self.tr.clone() {
+                let s = translate(s, table);
+            }
+            // TODO: self.output.<add to the end>(s);
+        }
+    }
+
+    fn word(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn number(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn text(&mut self) -> bool {
+        loop {
+            if let Some(idx) = self.s.find("\\") {
+                self.condputs(self.s[..idx].to_owned());
+                self.s = self.skip_char(self.s.as_str(), Some(idx)).to_owned();
+                if !self.esc_char_backslash() {
+                    self.condputs(Self::str_at(&self.s, 0).to_owned());
+                    self.s = self.skip_char(self.s.as_str(), None).to_owned();
+                }
+            } else {
+                self.condputs(self.s.clone());
+                self.s = String::new();
+                break;
+            }
+        }
+
+        true
+    }
+
+
+
+    fn do_tbl(&self) -> bool {
+
+
+        true
+    }
+
+    fn do_line(&mut self) -> bool {
+        if self.s.starts_with('\'') || self.s.starts_with('.') {
+            if !self.request_or_macro() {
+                false
+            } else {
+                true
+            }
+        } else if self.tbl {
+            self.do_tbl()
+        } else {
+            self.text()
+        }
+    }
+
+    fn deroff(&mut self, string: String) {
+        let lines = string.as_str().lines().map(|s| s.to_owned()).collect::<Vec<String>>();
+        for line in lines {
+            self.s = line;
+            self.s.push('\n');
+            if !self.do_line() {
+                break;
+            }
+        }
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
@@ -662,7 +999,7 @@ fn test_is_white() {
 
 //     def comment(self):
 //         # Here we require that the string start with \"
-//         while self.str_at(0) and self.str_at(0) != '\n': self.skip_char()
+//         whileSself.str_at(self.s, 0) and self.str_at(0) != '\n': self.skip_char()
 //         return True
 
 //     def numreq(self):
