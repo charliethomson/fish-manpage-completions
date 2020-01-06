@@ -42,6 +42,8 @@ struct Deroffer {
     tblstate: TblState,
     tblTab: String,
     eqn: bool,
+    skipheaders: bool,
+    skiplists: bool,
     output: Vec<TODO_TYPE>,
     name: String,
 
@@ -79,6 +81,8 @@ impl Deroffer {
             tblstate: TblState::Options,
             tblTab: String::new(),
             eqn: false,
+            skipheaders: false,
+            skiplists: false,
             output: Vec::new(),
             name: String::new(),
 
