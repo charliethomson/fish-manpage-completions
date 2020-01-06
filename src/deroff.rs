@@ -1,66 +1,4 @@
 
-#[test]
-fn test_deroff() {
-    unsafe {
-        // let path = "./fixtures/docker-rmi.1".to_owned();
-        let path = "./fixtures/qelectrotech.1".to_owned();
-        // let path = "./fixtures/mlterm.1".to_owned();
-        // let path = "./sstest.1".to_owned();
-        // deroff_files(&[path]);
-        let mut d = Deroffer::new();
-        // d.deroff(q.to_owned());
-        use std::io::Write;
-        let mut output = std::fs::File::create("./q.deroff").unwrap();
-        let mut buf: Vec<u8> = vec![];
-        let count = std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
-        // eprintln!("Raw buffer converted to chars: {:?}", buf.iter().map(|byte| *byte as char).collect::<String>());
-        let roff = String::from_utf8_lossy(&buf).to_string();
-        d.deroff(roff);
-        write!(output, "{}", d.get_output()).unwrap();
-        eprintln!("{:?}", d.get_output());
-    }
-}
-
-#[test]
-fn bytes_eq() {
-    unsafe {
-        // Load python bytes from file
-        let mut bytes_file = std::fs::File::open("./bytes.txt").unwrap();
-        let mut raw = String::new();
-        bytes_file.read_to_string(&mut raw).unwrap();
-        let bytes = raw.as_bytes();
-
-        // generate Rust bytes
-        let path = "./fixtures/qelectrotech.1".to_owned();
-        let mut d = Deroffer::new();
-        let mut rs_bytes = Vec::new();
-        let mut raw_bytes = Vec::new();
-        std::fs::File::open(path).unwrap().read_to_end(&mut raw_bytes).unwrap();
-        let mut roff = String::from_utf8_lossy(&raw_bytes).into();
-        d.deroff(roff);
-        let output = d.get_output();
-        eprintln!("Output: {}", output);
-
-        let mut output_buffer = Vec::new();
-        let mut good = true;
-
-        for (p, r) in bytes.clone().iter().zip(rs_bytes.clone().iter()) {
-            if p != r {
-                eprintln!("P: {} != R: {}", p, r);
-                good = false;
-            } else {
-                output_buffer.push(*p);   
-            }
-        }
-
-        if good {
-            use std::io::Write;
-            let mut output_file = std::fs::File::create("./bytes_output.txt").unwrap();
-            output_file.write(&output_buffer).unwrap();
-        }
-    }
-}
-
 // #[cfg(test)]
 // mod benches {
 //     extern crate test;
@@ -79,10 +17,11 @@ fn bytes_eq() {
 use libflate::gzip::Decoder;
 use regex::Regex;
 
-use crate::util::{maketrans, translate};
+use crate::util::TranslationTable;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::path::{ Path, PathBuf };
 
 const SKIP_LISTS: bool = false;
 const SKIP_HEADERS: bool = false;
@@ -104,7 +43,7 @@ struct Deroffer {
     reg_table: HashMap<String, String>,
     tr_from: String,
     tr_to: String,
-    tr: Option<HashMap<char, char>>,
+    tr: Option<TranslationTable>,
     specletter: bool,
     refer: bool,
     r#macro: bool,
@@ -117,6 +56,8 @@ struct Deroffer {
     tblTab: String,
     eqn: bool,
     output: String,
+    skipheaders: bool,
+    skiplists: bool,
     name: String,
 
     s: String, // This is not explicitly defined in python code
@@ -135,7 +76,8 @@ impl Deroffer {
                     (\(\S{2})  | # Open paren, then two printable chars
                     (\[\S*?\]) | # Open bracket, zero or more printable characters, then close bracket
                     \S)          # Any printable character
-                   "##),
+                   "##
+            ),
 
             reg_table: HashMap::new(),
             tr_from: String::new(),
@@ -153,6 +95,8 @@ impl Deroffer {
             tblTab: String::new(),
             eqn: false,
             output: String::new(),
+            skipheaders: false,
+            skiplists: false,
             name: String::new(),
 
             s: String::new(), // This is not explicitly defined in python code
@@ -440,7 +384,7 @@ impl Deroffer {
         self.s = self.s.trim_start().to_owned();
     }
 
-    fn str_at(&mut self, idx: usize) -> &str {
+    fn str_at(&self, idx: usize) -> &str {
         let s = &self.s;
         s.char_indices()
             .skip(idx)
@@ -457,11 +401,24 @@ impl Deroffer {
             .is_whitespace() // bool
     }
 
-    fn prch(&self, idx: usize) -> bool {
-        self.s
-            .get(idx..=idx)
-            .map(|c| !" \t\n".contains(c))
-            .unwrap_or_default()
+    /* fn is_white<'a>(s: &'a str, idx: usize) -> bool {
+        s
+          .chars()  // Chars
+          .nth(idx) // Option<char>
+          .unwrap_or('a') // char
+          .is_whitespace() // bool
+    } */
+
+    // This is also known as `prch` apparently
+    fn not_whitespace(&self, idx: usize) -> bool {
+        !" \t\n".contains(self.s.get(idx..idx + 1).unwrap_or_default())
+    }
+
+    fn digit(&self, idx: usize) -> bool {
+        match self.str_at(idx) {
+            "" => false,
+            c => c.chars().all(|c| c.is_digit(10)),
+        }
     }
 
     // Replaces the g_macro_dict lookup in the Python code
@@ -857,7 +814,10 @@ impl Deroffer {
         }
 
         // Update our table, then swap in the slower tr-savvy condputs
-        self.tr = Some(maketrans(self.tr_from.as_str(), self.tr_to.as_str()));
+        self.tr = match TranslationTable::new(&self.tr_from, &self.tr_to) {
+            Ok(table) => Some(table),
+            Err(e) => panic!("Encountered an error creating a new translation table from {}, {}: {}", self.tr_from, self.tr_to, e),
+        };
         true
     }
 
@@ -888,18 +848,12 @@ impl Deroffer {
     /// it `translate`s it using the set translation table and puts the result
     /// into `self.output`
     fn condputs(&mut self, s: &str) {
-        let is_special = {
-            self.pic
-                || self.eqn
-                || self.refer
-                || self.r#macro
-                || (self.inlist && self.inheader)
-                || (SKIP_HEADERS && SKIP_LISTS)
-        };
+        let is_special =
+            { self.pic || self.eqn || self.refer || self.r#macro || self.inlist || self.inheader };
 
         if !is_special {
-            if let Some(table) = self.tr.clone() {
-                self.output.push_str(translate(s.into(), table).as_str());
+            if let Some(table) = &self.tr {
+                self.output.push_str(&table.translate(s.into()));
             } else {
                 self.output.push_str(s);
             }
@@ -1087,17 +1041,17 @@ impl Deroffer {
         let s0s1 = &self.s[0..2];
         if s0s1 == "\\n" {
             if Some("dy") == self.s.get(3..5)
-                || (self.str_at(2) == "(" && self.prch(3) && self.prch(4))
+                || (self.str_at(2) == "(" && self.not_whitespace(3) && self.not_whitespace(4))
             {
                 self.skip_char(5);
                 return true;
-            } else if self.str_at(2) == "[" && self.prch(3) {
+            } else if self.str_at(2) == "[" && self.not_whitespace(3) {
                 self.skip_char(3);
                 while !self.str_at(0).is_empty() && self.str_at(0) != "]" {
                     self.skip_char(1);
                 }
                 return true;
-            } else if self.prch(2) {
+            } else if self.not_whitespace(2) {
                 self.skip_char(3);
                 return true;
             } else {
@@ -1105,10 +1059,10 @@ impl Deroffer {
             }
         } else if s0s1 == "\\*" {
             let mut reg = String::new();
-            if self.str_at(2) == "(" && self.prch(3) && self.prch(4) {
+            if self.str_at(2) == "(" && self.not_whitespace(3) && self.not_whitespace(4) {
                 reg = self.s[3..5].to_owned();
                 self.skip_char(5);
-            } else if self.str_at(2) == "[" && self.prch(3) {
+            } else if self.str_at(2) == "[" && self.not_whitespace(3) {
                 self.skip_char(3);
                 while !self.str_at(0).is_empty() && self.str_at(0) != "]" {
                     reg.push_str(self.str_at(0));
@@ -1134,10 +1088,6 @@ impl Deroffer {
         } else {
             return false;
         }
-    }
-
-    fn digit(&mut self, idx: usize) -> bool {
-        self.str_at(idx).chars().all(|c| c.is_numeric())
     }
 
     fn size(&mut self) -> bool {
@@ -1206,7 +1156,7 @@ impl Deroffer {
 
     fn spec(&mut self) -> bool {
         self.specletter = false;
-        if self.s.get(0..2).unwrap_or("") == "\\(" && self.prch(2) && self.prch(3) {
+        if self.s.get(0..2).unwrap_or("") == "\\(" && self.not_whitespace(2) && self.not_whitespace(3) {
             let key = self.s.get(2..4).unwrap_or("");
             if let Some(k) = Deroffer::g_specs_specletter(key) {
                 self.condputs(k);
@@ -1341,22 +1291,31 @@ impl Deroffer {
     }
 }
 
-fn deroff_files(files: &[String]) -> std::io::Result<()> {
+fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Result<()> {
     for arg in files {
         let mut file = File::open(arg)?;
         let mut string = String::new();
         if arg.ends_with(".gz") {
             let mut decoder = Decoder::new(file).unwrap();
-            decoder.read_to_string(&mut string);
+            decoder.read_to_string(&mut string)?;
         } else {
             file.read_to_string(&mut string)?;
         }
         let mut d = Deroffer::new();
 
         d.deroff(string);
-        let mut output = std::fs::File::create("./example.deroff").unwrap();
 
-        d.flush_output(output);
+        let filename = Path::new(arg).file_name().unwrap().to_str().unwrap();
+        let mut out_path = PathBuf::new();
+
+        out_path.push(&output_dir);
+        out_path.push(filename);
+
+        eprintln!("out_path: {:?}", out_path);
+
+        let out_file = File::create(out_path)?;
+
+        d.flush_output(out_file);
     }
     Ok(())
 }
@@ -1364,9 +1323,9 @@ fn deroff_files(files: &[String]) -> std::io::Result<()> {
 #[test]
 fn test_get_output() {
     let mut deroffer = Deroffer::new();
-    deroffer.s = "foo\n\nbar".into();
+    deroffer.output = "foo\n\nbar".into();
     assert_eq!(&deroffer.get_output(), "foo\n\nbar");
-    deroffer.s = "foo\n\n\nbar".into();
+    deroffer.output = "foo\n\n\nbar".into();
     assert_eq!(&deroffer.get_output(), "foo\nbar");
 }
 
@@ -1374,11 +1333,11 @@ fn test_get_output() {
 fn test_not_whitespace() {
     let mut d = Deroffer::new();
 
-    assert_eq!(d.prch(0), false);
-    assert_eq!(d.prch(9), false);
+    assert_eq!(d.not_whitespace(0), false);
+    assert_eq!(d.not_whitespace(9), false);
     d.s = "ab cd".to_owned();
-    assert_eq!(d.prch(2), false);
-    assert_eq!(d.prch(3), true);
+    assert_eq!(d.not_whitespace(2), false);
+    assert_eq!(d.not_whitespace(3), true);
 }
 
 #[test]
@@ -1427,7 +1386,7 @@ fn test_condputs() {
     );
 
     // Test the translation check
-    d.tr = Some(maketrans("Ttr", "AAA"));
+    d.tr = TranslationTable::new("Ttr", "AAA").ok();
     d.condputs("Translate test");
     assert_eq!(
         d.output,
@@ -1593,4 +1552,15 @@ fn test_var() {
 
         print(d.output)
     */
+}
+
+#[test]
+fn test_deroff() {
+    deroff_files(&[
+            "./fixtures/docker-rmi.1".to_owned(),
+            "./fixtures/qelectrotech.1".to_owned(),
+            "./fixtures/mlterm.1".to_owned(),
+        ],
+        "test_deroff"
+    ).unwrap();
 }
