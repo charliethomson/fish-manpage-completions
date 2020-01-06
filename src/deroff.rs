@@ -1292,6 +1292,10 @@ impl Deroffer {
 }
 
 fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Result<()> {
+    if !output_dir.as_ref().exists() {
+        eprintln!("output dir doesn't exist, creating one for you");
+        std::fs::create_dir_all(output_dir.as_ref());
+    }
     for arg in files {
         let mut file = File::open(arg)?;
         let mut string = String::new();
@@ -1310,8 +1314,6 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
 
         out_path.push(&output_dir);
         out_path.push(filename);
-
-        eprintln!("out_path: {:?}", out_path);
 
         let out_file = File::create(out_path)?;
 
