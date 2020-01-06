@@ -1,20 +1,64 @@
 
 #[test]
 fn test_deroff() {
-    // let path = "./fixtures/docker-rmi.1".to_owned();
-    // let path = "./fixtures/qelectrotech.1".to_owned();
-    let path = "./fixtures/mlterm.1".to_owned();
-    // let path = "./sstest.1".to_owned();
-    // deroff_files(&[path]);
-    let mut d = Deroffer::new();
-    // d.deroff(q.to_owned());
-    use std::io::Write;
-    let mut output = std::fs::File::create("./q.deroff").unwrap();
-    let mut roff = String::new();
-    std::fs::File::open(path).unwrap().read_to_string(&mut roff).unwrap();
-    d.deroff(roff);
-    write!(output, "{}", d.output);
-    eprintln!("{:?}", d.output);
+    unsafe {
+        // let path = "./fixtures/docker-rmi.1".to_owned();
+        let path = "./fixtures/qelectrotech.1".to_owned();
+        // let path = "./fixtures/mlterm.1".to_owned();
+        // let path = "./sstest.1".to_owned();
+        // deroff_files(&[path]);
+        let mut d = Deroffer::new();
+        // d.deroff(q.to_owned());
+        use std::io::Write;
+        let mut output = std::fs::File::create("./q.deroff").unwrap();
+        let mut buf: Vec<u8> = vec![];
+        let count = std::fs::File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+        // eprintln!("Raw buffer converted to chars: {:?}", buf.iter().map(|byte| *byte as char).collect::<String>());
+        let roff = String::from_utf8_lossy(&buf).to_string();
+        d.deroff(roff);
+        write!(output, "{}", d.get_output()).unwrap();
+        eprintln!("{:?}", d.get_output());
+    }
+}
+
+#[test]
+fn bytes_eq() {
+    unsafe {
+        // Load python bytes from file
+        let mut bytes_file = std::fs::File::open("./bytes.txt").unwrap();
+        let mut raw = String::new();
+        bytes_file.read_to_string(&mut raw).unwrap();
+        let bytes = raw.as_bytes();
+
+        // generate Rust bytes
+        let path = "./fixtures/qelectrotech.1".to_owned();
+        let mut d = Deroffer::new();
+        let mut rs_bytes = Vec::new();
+        let mut raw_bytes = Vec::new();
+        std::fs::File::open(path).unwrap().read_to_end(&mut raw_bytes).unwrap();
+        let mut roff = String::from_utf8_lossy(&raw_bytes).into();
+        d.deroff(roff);
+        let output = d.get_output();
+        eprintln!("Output: {}", output);
+
+        let mut output_buffer = Vec::new();
+        let mut good = true;
+
+        for (p, r) in bytes.clone().iter().zip(rs_bytes.clone().iter()) {
+            if p != r {
+                eprintln!("P: {} != R: {}", p, r);
+                good = false;
+            } else {
+                output_buffer.push(*p);   
+            }
+        }
+
+        if good {
+            use std::io::Write;
+            let mut output_file = std::fs::File::create("./bytes_output.txt").unwrap();
+            output_file.write(&output_buffer).unwrap();
+        }
+    }
 }
 
 // #[cfg(test)]
@@ -115,10 +159,8 @@ impl Deroffer {
         }
     }
 
-    fn get_output(&self, output: &[u8]) -> Result<String, String> {
-        let s = String::from_utf8(output.into())
-            .map_err(|err| format!("Bad bad bad (bad utf8)! {}", err))?;
-        Ok(self.g_re_newline_collapse.replace_all(&s, "\n").into())
+    fn get_output(&self) -> String {
+        self.g_re_newline_collapse.replace_all(&self.output, "\n").into()
     }
 
     // for the moment, return small strings, until we figure out what
@@ -391,7 +433,7 @@ impl Deroffer {
     }
 
     fn skip_char(&mut self, amount: usize) {
-        self.s = self.s.get(amount..).unwrap_or("").to_owned();
+        self.s.drain(..amount);
     }
 
     fn skip_leading_whitespace(&mut self) {
@@ -1321,9 +1363,11 @@ fn deroff_files(files: &[String]) -> std::io::Result<()> {
 
 #[test]
 fn test_get_output() {
-    let deroffer = Deroffer::new();
-    assert_eq!(&deroffer.get_output(b"foo\n\nbar").unwrap(), "foo\n\nbar");
-    assert_eq!(&deroffer.get_output(b"foo\n\n\nbar").unwrap(), "foo\nbar");
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "foo\n\nbar".into();
+    assert_eq!(&deroffer.get_output(), "foo\n\nbar");
+    deroffer.s = "foo\n\n\nbar".into();
+    assert_eq!(&deroffer.get_output(), "foo\nbar");
 }
 
 #[test]
