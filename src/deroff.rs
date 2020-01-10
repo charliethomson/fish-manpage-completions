@@ -20,6 +20,7 @@ use regex::Regex;
 use crate::util::TranslationTable;
 use std::collections::HashMap;
 use std::fs::File;
+use std::cell::Cell;
 use std::io::Read;
 use std::path::{ Path, PathBuf };
 
@@ -55,7 +56,7 @@ struct Deroffer {
     tblstate: TblState,
     tblTab: String,
     eqn: bool,
-    output: String,
+    output: Cell<String>,
     skipheaders: bool,
     skiplists: bool,
     name: String,
@@ -94,7 +95,7 @@ impl Deroffer {
             tblstate: TblState::Options,
             tblTab: String::new(),
             eqn: false,
-            output: String::new(),
+            output: Cell::new(String::new()),
             skipheaders: false,
             skiplists: false,
             name: String::new(),
@@ -104,7 +105,10 @@ impl Deroffer {
     }
 
     fn get_output(&self) -> String {
-        self.g_re_newline_collapse.replace_all(&self.output, "\n").into()
+        let o = self.output.take();
+        let a = self.g_re_newline_collapse.replace_all(&o, "\n").into();
+        self.output.set(o);
+        a
     }
 
     // for the moment, return small strings, until we figure out what
@@ -394,7 +398,10 @@ impl Deroffer {
     }
 
     fn is_white(&self, idx: usize) -> bool {
-        self.str_at(idx).chars().all(|c| c.is_whitespace())
+        match self.str_at(idx) {
+            "" => false,
+            c => c.chars().all(|c| c.is_whitespace()),
+        }
     }
 
     // This is also known as `prch` apparently
@@ -488,7 +495,7 @@ impl Deroffer {
     // Done by Kevin, not merged >:'(
     fn macro_nm(&mut self) -> bool {
         if self.s == "Nm\n" {
-            self.condputs(self.name);
+            self.condputs(&self.name);
         } else {
             let mut s = self.s[3..].trim().to_owned();
             s.push(' ');
@@ -835,16 +842,18 @@ impl Deroffer {
     /// if `self.tr` is set, instead of putting `s` into `self.output` directly,
     /// it `translate`s it using the set translation table and puts the result
     /// into `self.output`
-    fn condputs(&mut self, s: &str) {
+    fn condputs(&self, s: &str) {
         let is_special =
             { self.pic || self.eqn || self.refer || self.r#macro || self.inlist || self.inheader };
 
         if !is_special {
+            let mut o = self.output.take();
             if let Some(table) = &self.tr {
-                self.output.push_str(&table.translate(s.into()));
+                o.push_str(&table.translate(s.into()));
             } else {
-                self.output.push_str(s);
+                o.push_str(s);
             }
+            self.output.set(o);
         }
     }
 
@@ -1275,7 +1284,9 @@ impl Deroffer {
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
-        write!(write, "{}", self.output).expect("FAILED TO WRITE OUT");
+        let o = self.output.take();
+        write!(write, "{}", o).expect("FAILED TO WRITE OUT");
+        self.output.set(o);
     }
 }
 
@@ -1313,9 +1324,9 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
 #[test]
 fn test_get_output() {
     let mut deroffer = Deroffer::new();
-    deroffer.output = "foo\n\nbar".into();
+    deroffer.output.set("foo\n\nbar".into());
     assert_eq!(&deroffer.get_output(), "foo\n\nbar");
-    deroffer.output = "foo\n\n\nbar".into();
+    deroffer.output.set("foo\n\n\nbar".into());
     assert_eq!(&deroffer.get_output(), "foo\nbar");
 }
 
@@ -1362,26 +1373,39 @@ fn test_is_white() {
 fn test_condputs() {
     let mut d = Deroffer::new();
 
-    assert_eq!(d.output, String::new());
+    let o = d.output.take();
+    assert_eq!(o, String::new());
+    d.output.set(o);
+
     d.condputs("Hello World!\n");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
+
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
+
     d.pic = true;
     d.condputs("This won't go to output");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
+
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
+
     d.pic = false;
     d.condputs("This will go to output :)");
-    assert_eq!(
-        d.output,
-        "Hello World!\nThis will go to output :)".to_owned()
-    );
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\nThis will go to output :)".to_owned());
+    d.output.set(o);
 
     // Test the translation check
     d.tr = TranslationTable::new("Ttr", "AAA").ok();
     d.condputs("Translate test");
+
+    let o = d.output.take();
     assert_eq!(
-        d.output,
+        o,
         "Hello World!\nThis will go to output :)AAanslaAe AesA".to_owned()
     );
+    d.output.set(o);
 }
 
 #[test]
@@ -1441,7 +1465,9 @@ fn test_var() {
         .insert("tr".to_owned(), "Hello World!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " World!");
-    assert!(d.output.contains("Hello"));
+    let o = d.output.take();
+    assert!(o.contains("Hello"));
+    d.output.set(o);
 
     d.s = "\\*(aaHello World!".to_owned();
     assert!(d.var() == false);
@@ -1474,7 +1500,9 @@ fn test_var() {
         .insert("test_reg".to_owned(), "It me!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " me!");
-    assert!(d.output.contains("It"));
+    let o = d.output.take();
+    assert!(o.contains("It"));
+    d.output.set(o);
 
     // no "]"
     d.s = "\\*[foo bar :)".to_owned();
