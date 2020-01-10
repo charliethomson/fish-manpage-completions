@@ -394,20 +394,8 @@ impl Deroffer {
     }
 
     fn is_white(&self, idx: usize) -> bool {
-        self.s // String
-            .chars() // Chars
-            .nth(idx) // Option<char>
-            .unwrap_or('a') // char
-            .is_whitespace() // bool
+        self.str_at(idx).chars().all(|c| c.is_whitespace())
     }
-
-    /* fn is_white<'a>(s: &'a str, idx: usize) -> bool {
-        s
-          .chars()  // Chars
-          .nth(idx) // Option<char>
-          .unwrap_or('a') // char
-          .is_whitespace() // bool
-    } */
 
     // This is also known as `prch` apparently
     fn not_whitespace(&self, idx: usize) -> bool {
@@ -500,7 +488,7 @@ impl Deroffer {
     // Done by Kevin, not merged >:'(
     fn macro_nm(&mut self) -> bool {
         if self.s == "Nm\n" {
-            self.condputs(self.name.clone().as_str());
+            self.condputs(self.name);
         } else {
             let mut s = self.s[3..].trim().to_owned();
             s.push(' ');
