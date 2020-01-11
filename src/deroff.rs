@@ -1202,9 +1202,7 @@ impl Deroffer {
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
-        let o = self.output.take();
-        write!(write, "{}", o).expect("FAILED TO WRITE OUT");
-        self.output.set(o);
+        write!(write, "{}", self.get_output()).expect("FAILED TO WRITE OUT");
     }
 }
 
