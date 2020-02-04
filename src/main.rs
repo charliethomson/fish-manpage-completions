@@ -1157,8 +1157,6 @@ fn file_is_overwritable(path: &Path) -> Result<bool, String> {
     Ok(file
         .split(b'\n')
         .map(|line| {
-            // Okay to panic via `expect` here since we've already verified
-            // that we can open the file for reading.
             bstr::B(&line.unwrap_or_else(|_| panic!("I/O error encountered reading {}", display)))
                 .trim()
                 .to_owned()
