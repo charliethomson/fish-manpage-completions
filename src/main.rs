@@ -247,7 +247,7 @@ fn fish_options(options: &str, existing_options: &mut HashSet<String>) -> Vec<St
 
         let (fish_opt, num_dashes) = if option.starts_with("--") {
             ("l", 2)
-        } else if option.starts_with("-") {
+        } else if option.starts_with('-') {
             (if option.len() == 2 { "s" } else { "o" }, 1)
         } else {
             continue;
@@ -348,7 +348,7 @@ fn truncated_description(description: &str) -> String {
     let sentences = description.replace(r"\'", "'").replace(r"\.", ".");
 
     let mut sentences = sentences
-        .split(".")
+        .split('.')
         .filter(|sentence| !sentence.trim().is_empty());
 
     let mut out = format!(
@@ -591,7 +591,7 @@ impl ManParser for Type1 {
 
 impl Type1 {
     fn fallback(
-        &self,
+        self,
         mut options_section: &str,
         built_command_output: &mut Vec<String>,
         existing_options: &mut HashSet<String>,
@@ -636,7 +636,7 @@ impl Type1 {
     }
 
     fn fallback2(
-        &self,
+        self,
         options_section: &str,
         built_command_output: &mut Vec<String>,
         existing_options: &mut HashSet<String>,
@@ -1048,7 +1048,7 @@ fn test_TypeDeroff_is_option() {
 
 impl TypeDeroff {
     fn is_option(line: &str) -> bool {
-        line.starts_with("-")
+        line.starts_with('-')
     }
 }
 
@@ -1061,7 +1061,7 @@ fn test_could_be_description() {
 
 impl TypeDeroff {
     fn could_be_description(line: &str) -> bool {
-        line.len() > 0 && !line.starts_with("-")
+        !line.is_empty() && !line.starts_with('-')
     }
 }
 
@@ -1159,7 +1159,7 @@ fn file_is_overwritable(path: &Path) -> Result<bool, String> {
         .map(|line| {
             // Okay to panic via `expect` here since we've already verified
             // that we can open the file for reading.
-            bstr::B(&line.expect(&format!("I/O error encountered reading {}", display)))
+            bstr::B(&line.unwrap_or_else(|_| panic!("I/O error encountered reading {}", display)))
                 .trim()
                 .to_owned()
         })

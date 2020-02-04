@@ -52,12 +52,10 @@ struct Deroffer {
     inheader: bool,
     pic: bool,
     tbl: bool,
-    tblstate: TblState,
-    tblTab: String,
+    tbl_state: TblState,
+    tbl_tab: String,
     eqn: bool,
     output: Cell<String>,
-    skipheaders: bool,
-    skiplists: bool,
     name: String,
 
     s: String, // This is not explicitly defined in python code
@@ -91,12 +89,10 @@ impl Deroffer {
             inheader: false,
             pic: false,
             tbl: false,
-            tblstate: TblState::Options,
-            tblTab: String::new(),
+            tbl_state: TblState::Options,
+            tbl_tab: String::new(),
             eqn: false,
             output: Cell::new(String::new()),
-            skipheaders: false,
-            skiplists: false,
             name: String::new(),
 
             s: String::new(), // This is not explicitly defined in python code
@@ -390,8 +386,7 @@ impl Deroffer {
     fn str_at(&self, idx: usize) -> &str {
         let s = &self.s;
         s.char_indices()
-            .skip(idx)
-            .next()
+            .nth(idx)
             .map(|(i, c)| &s[i..(i + c.len_utf8())])
             .unwrap_or("")
     }
@@ -405,7 +400,7 @@ impl Deroffer {
 
     // This is also known as `prch` apparently
     fn not_whitespace(&self, idx: usize) -> bool {
-        !" \t\n".contains(self.s.get(idx..idx + 1).unwrap_or_default())
+        !" \t\n".contains(self.s.get(idx..=idx).unwrap_or_default())
     }
 
     fn digit(&self, idx: usize) -> bool {
@@ -562,7 +557,7 @@ impl Deroffer {
 
         if self.is_white(2) {
             self.tbl = true;
-            self.tblstate = TblState::Options;
+            self.tbl_state = TblState::Options;
         }
 
         self.condputs("\n");
@@ -580,7 +575,7 @@ impl Deroffer {
 
         if self.is_white(2) {
             self.tbl = true;
-            self.tblstate = TblState::Format;
+            self.tbl_state = TblState::Format;
         }
 
         self.condputs("\n");
@@ -720,7 +715,7 @@ impl Deroffer {
         self.skip_leading_whitespace();
 
         if !self.str_at(0).is_empty() {
-            let comps: Vec<String> = self.s.splitn(2, " ").map(|s| s.into()).collect();
+            let comps: Vec<String> = self.s.splitn(2, ' ').map(|s| s.into()).collect();
 
             if comps.len() == 2 {
                 let name: String = comps.get(0).unwrap().into();
@@ -785,7 +780,7 @@ impl Deroffer {
         if !is_special {
             let mut o = self.output.take();
             if let Some(table) = &self.tr {
-                o.push_str(&table.translate(s.into()));
+                o.push_str(&table.translate(s));
             } else {
                 o.push_str(s);
             }
@@ -1050,7 +1045,7 @@ impl Deroffer {
 
     fn text(&mut self) -> bool {
         loop {
-            if let Some(idx) = self.s.clone().find("\\") {
+            if let Some(idx) = self.s.clone().find('\\') {
                 self.condputs(self.s.clone().get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
                 self.skip_char(idx);
                 if !self.esc_char_backslash() {
@@ -1107,7 +1102,7 @@ impl Deroffer {
     }
 
     fn do_tbl(&mut self) -> bool {
-        match self.tblstate {
+        match self.tbl_state {
             TblState::Options => {
                 while !self.s.is_empty() && ";\n".contains(&self.s[0..=0]) {
                     self.skip_leading_whitespace();
@@ -1136,7 +1131,7 @@ impl Deroffer {
                         }
 
                         if !arg.is_empty() {
-                            if arg.find(")") == None {
+                            if arg.find(')') == None {
                                 arg = arg[..idx].to_owned();
                             }
                             self.s = self.s[idx + 1..].to_owned();
@@ -1146,12 +1141,12 @@ impl Deroffer {
                         }
 
                         if option.to_lowercase() == "tab" {
-                            self.tblTab = arg[0..=0].to_owned();
+                            self.tbl_tab = arg[0..=0].to_owned();
                         }
                     }
                 }
 
-                self.tblstate = TblState::Format;
+                self.tbl_state = TblState::Format;
                 self.condputs("\n");
             }
             TblState::Format => {
@@ -1163,14 +1158,14 @@ impl Deroffer {
                 }
 
                 if self.str_at(0) == "." {
-                    self.tblstate = TblState::Data;
+                    self.tbl_state = TblState::Data;
                 }
 
                 self.condputs("\n");
             }
             TblState::Data => {
-                if !self.tblTab.is_empty() {
-                    self.s = self.s.replace(&self.tblTab, "\t");
+                if !self.tbl_tab.is_empty() {
+                    self.s = self.s.replace(&self.tbl_tab, "\t");
                 }
 
                 self.text();
@@ -1191,7 +1186,7 @@ impl Deroffer {
     }
 
     fn deroff(&mut self, string: String) {
-        for line in string.split("\n") {
+        for line in string.split('\n') {
             let mut line = line.to_owned();
             line.push('\n');
             self.s = line;
@@ -1209,16 +1204,24 @@ impl Deroffer {
 fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Result<()> {
     if !output_dir.as_ref().exists() {
         eprintln!("output dir doesn't exist, creating one for you");
-        std::fs::create_dir_all(output_dir.as_ref());
+        std::fs::create_dir_all(output_dir.as_ref())?;
     }
     for arg in files {
         let mut file = File::open(arg)?;
         let mut string = String::new();
         if arg.ends_with(".gz") {
-            let mut decoder = Decoder::new(file).unwrap();
+            let mut decoder = Decoder::new(file)?;
             decoder.read_to_string(&mut string)?;
         } else {
-            file.read_to_string(&mut string)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            string = String::from_utf8(bytes).unwrap_or_else(|bytes| {
+                let mut buffer = String::new();
+                for b in bytes.into_bytes() {
+                    buffer.push(b as char);
+                }
+                buffer
+            });
         }
         let mut d = Deroffer::new();
 
