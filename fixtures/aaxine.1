@@ -1,0 +1,147 @@
+.\" 
+.TH "AAXINE" "1" "24. Januar 2002" "Das xine Projekt" ""
+.SH "NAME"
+aaxine \- Ein ASCII\-Zeichensatz Video\-Player
+
+.SH "SYNTAX"
+.B aaxine 
+.RI [ aalib\-Optionen ] 
+.RI [ \-A <Audiotreiber>] 
+.RI [ \-a <Tonspur>] 
+.RI [ \-R <Erkennungsmethode>] 
+.RI [ MRL ...]
+.br 
+
+.SH "BESCHREIBUNG"
+Diese Handbuchseite beschreibt das Programm
+.B aaxine.
+Aaxine ist eine auf aalib basierende Bedienoberfläche für xine\-lib, einem vielseitigen Video/Multimedia\-Player.
+.PP 
+\fBaaxine\fP ist für Leute ohne hochwertige Grafikkarte gedacht, die dennoch ihre DVDs auf ihrem alten vt100 betrachten wollen :\-)
+
+Wie auch \fBxine\fR spielt \fBaaxine\fP MPEG system streams (Ton und Video), MPEG elementary streams (Z.B. .mp3 und .mpv Dateien), AVI Dateien (benutzt win32 codes oder ffmpeg), (S)VCDs und DVDs ab, kurz gesagt, alles was von xine\-lib unterstützt wird.
+.SH "OPTIONEN"
+Dieses Programm folgt dem üblichen Format der GNU Kommandozeilenoptionen, in dem lange Optionen mit 2 Minuszeichen (`\-') beginnen.
+Eine Zusammenfassung der Optionen ist unten aufgeführt.
+Für eine vollständige Beschreibung wird auf die \fIREADME\fP und \fIFAQ\fP in \fI/usr/share/doc/xine-ui\fP oder auf die xine\-Homepage verwiesen.
+
+.TP 
+.B \-h,\ \-\-help
+Zeigt eine Zusammenfassung der Optionen und die verfügbaren Ausgabe\-Treiber (Plugins) an.
+.PP 
+Eine Vielzahl der Optionen wird von \fBaalib\fR zur Verfügung gestellt, die in der dortigen Dokumentation beschrieben sind.
+.PP 
+Die folgenden Optionen, die beim Aufruf von "aaxine \-\-help" mit
+.B AAXINE options:
+überschrieben sind, werden im folgenden erläutert.
+.TP 
+.BI \-A,\ \-\-audio\-driver\  <Treiber>
+Angegebenen Audiotreiber benutzen. Zur Verfügung stehende Treiber können mit "aaxine \-\-help" aufgelistet werden.
+.TP 
+.BI \-a,\ \-\-audio\-channel\  <Nummer>
+Angegebene Tonspur benutzen. Tonkanäle sind fortlaufend von 0 für die erste Tonspur nummeriert.
+.TP 
+.BR \-R,\ \-\-recognize\-by\  [Option]
+Methode zum identifizieren eines Titels festlegen. Mögliche Optionen sind:
+.RS
+.IP  `\fBdefault\fP'
+Zuerst nach dem Inhalt, dann nach der Erweiterung.
+.IP  `\fBrevert\fP'
+Zuerst nach der Erweiterung, dann nach dem Inhalt.
+.IP  `\fBcontent\fP'
+Nur nach dem Inhalt,
+.IP  `\fBextension\fP'
+Nur nach der Erweiterung.
+.PP 
+Wird nur \fB\-R\fP ohne einen weiteren Parameter angegeben, so wird `\fBrevert\fP' ausgewählt.
+.RE
+.SH "MRLs"
+MRLs sind ähnlich wir URLs im Web\-Browser und beschreiben die zu spielenden Titel. Gültige MRLs können einfache Dateinamen sein oder folgendermaßen aussehen:
+.TP 
+.BI file: <Pfad>
+.TP 
+.BI fifo: <Pfad>
+.TP 
+.BR stdin:/
+.TP 
+.BI dvd:/ <Titel> . <Part>
+.TP 
+.BI vcd:/ <Track\ Nummer>
+.TP 
+.BI tcp:// <host> : <port>
+.TP 
+.BI rtp:// <host> : <port>
+.TP 
+.BI udp:// <host> : <port>
+.TP 
+.BI mms:// <host>...
+.TP 
+.BI http:// <host>...
+.TP 
+.BI cdda:// <Titelnummer>
+.PP 
+Mehrere MRLs können angegeben werden, um mehrere Titel nacheinander zu spielen. Die oben aufgeführten MRLs werden standardmäßig von libxine unterstützt. Zusätzliche Plugins können diese Liste um weitere MRLs ergänzen.
+.br
+Nach einem trennenden
+.B #
+können Parameter für den Abspielvorgang angegeben werden:
+.TP
+.B novideo
+Videodaten werden ignoriert
+.TP
+.B noaudio
+Tondaten werden ignoriert
+.TP
+.B nospu
+Untertitel werden ignoriert
+.TP
+.BI demux: <Demux\ Name>
+bestimmt das zu verwendende Demux Plugin
+.TP
+.BI volume: <Pegel>
+setzt die Lautstärke
+.TP
+.BI compression: <Pegel>
+setzt die Dynamikkompression
+.TP
+.IB <Konfigurationseintrag> : <Wert>
+weist einem Konfigurationseintrag einen neuen Wert zu
+
+.SH "BEDIENTASTEN"
+Viele Funktionen können über Tastatur bedient werden. Die Tastaturzuordnung ist wie folgt:
+.IP  "\fB<RETURN>\fP oder \fBR\fP"
+Wiedergabe.
+.IP  "\fB<LEERTASTE>\fP oder \fBP\fP"
+Pause.
+.IP  "\fB0\fP"
+Zum Anfang des momentanen Titels springen.
+.IP  "\fB1\fP .. \fB9\fP"
+Zu 10%..90% des momentanen Titels springen.
+.IP  "\fB<PgUp>\fP"
+Zum vorherigen Titel in der Wiedergabeliste springen.
+.IP  "\fB<PgDown>\fP"
+Zum nächsten Titel in der Wiedergabeliste springen.
+.IP  "\fB+\fP"
+Nächsten Tonkanal auswählen. (Der Wechsel kann sich bis zu einigen Sekunden verzögern)
+.IP  "\fB\-\fP"
+Vorherigen Tonkanal auswählen.
+.IP  "\fBQ\fP"
+Beenden.
+.SH "FEHLER"
+Natürlich keine ;\-)
+Okay, ein paar könnten schon drin sein. Nach Unterstützung fragen (und Fehler melden) kann man auf der Mailingliste <xine\-user.de@lists.sf.net>.
+
+.SH "SIEHE AUCH"
+.BR xine (1),
+.UR http://xine.sourceforge.net/
+.BR http://xine.sf.net,
+.UE
+.UR http://aa\-project.sourceforge.net/aalib/
+.BR http://aa\-project.sf.net/aalib,
+.UE
+.BR xine\-lib (3)
+
+.SH "AUTOR"
+Diese Hilfe wurde von Philipp Hahn <pmhahn@users.sf.net> für das xine Project übersetzt. Original von Siggi Langauf.
+.SH "COPYRIGHT"
+Copyright \(co 2001\-2002 The xine project

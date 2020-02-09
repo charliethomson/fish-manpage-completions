@@ -1,15 +1,3 @@
-// #[cfg(test)]
-// mod benches {
-//     extern crate test;
-//     use super::*;
-//     use test::Bencher;
-//     #[bench]
-//     fn bench_deroff(b: &mut Bencher) {
-//         b.iter(|| {
-//             deroff_files(&["./fixtures/qelectrotech.1".to_owned()]);
-//         })
-//     }
-// }
 
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/deroff.py
 // """ Deroff.py, ported to Python from the venerable deroff.c """
@@ -423,7 +411,7 @@ impl Deroffer {
                 self.condputs(m.as_str());
                 got_something = true;
             } else if !self.esc_char() {
-                self.condputs(self.s.clone().get(0..=0).unwrap_or(""));
+                self.condputs(self.str_at(0));
                 self.skip_char(1);
                 got_something = true;
             }
@@ -802,10 +790,10 @@ impl Deroffer {
     // Thanks Steve, I only modified it a little, like, completely
     fn esc_char(&mut self) -> bool {
         self.s
-            .clone()
-            .get(0..1)
+            .chars()
+            .next()
             .and_then(|ch| {
-                if ch == "\\" {
+                if ch == '\\' {
                     Some(self.esc_char_backslash())
                 } else {
                     Some(self.word() || self.number())
@@ -819,8 +807,7 @@ impl Deroffer {
             self.skip_char(1);
             while !self.s.is_empty() && self.str_at(0) != "\"" {
                 if !self.esc_char() {
-                    // There's another check for s being empty here, but it "should" be safe w/o it
-                    self.condputs(&self.s.clone()[0..=0]);
+                    self.condputs(self.str_at(0));
                     self.skip_char(1);
                 }
             }
@@ -861,7 +848,7 @@ impl Deroffer {
         };
 
         self.nobody = false;
-        let s0s1 = self.s.clone().chars().take(2).collect::<String>();
+        let s0s1 = self.s.chars().take(2).collect::<String>();
 
         if self.g_macro_dispatch(s0s1.as_str()) {
             return true;
@@ -913,12 +900,7 @@ impl Deroffer {
         // In the python, it has a check that is already handled in esc_char_backslash, which is
         // the only place it gets called, so I'll omit that check here
 
-        // This is written as `self.macro += 1` in the source, but I dont know why
-        // it does the same thing (false -> true, true -> still true) :shrug:
-        // self.r#macro = true;
-        // Upon further investigation, this is the weirdest function ever
-        // This is just a state placeholder thing
-        let mut m = self.r#macro as u8 + 1;
+        let m = self.r#macro as u8 + 1;
 
         self.skip_char(3);
 
@@ -933,8 +915,7 @@ impl Deroffer {
             self.skip_char(1);
         }
 
-        m -= 1;
-        self.r#macro = m != 0;
+        self.r#macro = m - 1 != 0;
 
         true
     }
@@ -1045,11 +1026,11 @@ impl Deroffer {
 
     fn text(&mut self) -> bool {
         loop {
-            if let Some(idx) = self.s.clone().find('\\') {
-                self.condputs(self.s.clone().get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
+            if let Some(idx) = self.s.find('\\') {
+                self.condputs(self.s.get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
                 self.skip_char(idx);
                 if !self.esc_char_backslash() {
-                    self.condputs(self.s.clone().get(0..1).unwrap_or("")); // TODO: Fix! this may cause bugs later
+                    self.condputs(self.str_at(0)); // TODO: Fix! this may cause bugs later
                     self.skip_char(1);
                 }
             } else {
@@ -1193,7 +1174,9 @@ impl Deroffer {
             if !self.do_line() {
                 break;
             }
+            eprintln!("aaa {}", self.s);
         }
+        eprintln!("Fin: {}", self.output.take());
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
@@ -1495,9 +1478,13 @@ fn test_var() {
 fn test_deroff() {
     deroff_files(
         &[
-            "./fixtures/docker-rmi.1".to_owned(),
-            "./fixtures/qelectrotech.1".to_owned(),
-            "./fixtures/mlterm.1".to_owned(),
+            // "./fixtures/docker-rmi.1".to_owned(),
+            // "./fixtures/qelectrotech.1".to_owned(),
+            // "./fixtures/mlterm.1".to_owned(),
+            // "./fixtures/aaxine.1".to_owned(),
+            // "./fixtures/apper.1".to_owned(),
+            // "./fixtures/chsh.1".to_owned(),
+            "./fixtures/aria2c.1".to_owned(),
         ],
         "test_deroff",
     )
