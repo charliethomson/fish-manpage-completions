@@ -1,0 +1,118 @@
+'\" t
+.\"     Title: \fBapper\fR
+.\"    Author: Daniel Nicoletti <dantti12@gmail.com>
+.\" Generator: DocBook XSL Stylesheets v1.79.1 <http://docbook.sf.net/>
+.\"      Date: 2016-11-28
+.\"    Manual: Anv\(:andarhandbok Apper
+.\"    Source: apper 0.9.3
+.\"  Language: Swedish
+.\"
+.TH "\FBAPPER\FR" "1" "2016\-11\-28" "apper 0.9.3" "Anv\(:andarhandbok Apper"
+.\" -----------------------------------------------------------------
+.\" * Define some portability stuff
+.\" -----------------------------------------------------------------
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.\" http://bugs.debian.org/507673
+.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.\" -----------------------------------------------------------------
+.\" * set default formatting
+.\" -----------------------------------------------------------------
+.\" disable hyphenation
+.nh
+.\" disable justification (adjust text to left margin only)
+.ad l
+.\" -----------------------------------------------------------------
+.\" * MAIN CONTENT STARTS HERE *
+.\" -----------------------------------------------------------------
+.SH "NAMN"
+apper \- En program\- och pakethanterare som anv\(:ander PackageKit
+.SH "SYNOPSIS"
+.HP \w'\fBapper\fR\ 'u
+\fBapper\fR [\fB\-\-updates\fR] [\fB\-\-settings\fR] [\fB\-\-backend\-details\fR] [\fB\-\-type\fR\fI Mime\-typ\fR] [\fB\-\-name\fR\fI namn\fR] [\fB\-\-file\fR\fI fil\fR] [\fB\-\-resource\fR\fI teckensnitt\fR] [\fB\-\-catalog\fR\fI fil\fR]
+.SH "BESKRIVNING"
+.PP
+Apper \(:ar gr\(:anssnittet till PackageKit
+.PP
+Apper kan hantera paket, program och uppdateringar p\(oa ett distributionsoberoende s\(:att tack vara PackageKit\-projektet\&.
+.PP
+Det tillhandah\(oaller ett enda program f\(:or
+Linux\(rg\-anv\(:andare som de kan l\(:ara sig och anv\(:anda oberoende av vilken distribution de anv\(:ander\&.
+.SH "V\(:ALJARE"
+.PP
+\fB\-\-updates\fR
+.RS 4
+Visa tillg\(:angliga uppdateringar
+.RE
+.PP
+\fB\-\-settings\fR
+.RS 4
+Visa Appers inst\(:allningssida\&.
+.RE
+.PP
+\fB\-\-backend\-details\fR
+.RS 4
+Visa information om bakgrundsprogrammet som PackageKit f\(:or n\(:arvarande anv\(:ander\&.
+.RE
+.PP
+\fB\-\-type\fR \fIMime\-typ\fR
+.RS 4
+Anropa installation av Mime\-typ\&.
+.RE
+.PP
+\fB\-\-name\fR \fInamn\fR
+.RS 4
+Installera paket vid namn
+\fInamn\fR\&.
+.RE
+.PP
+\fB\-\-file\fR \fIfil\fR
+.RS 4
+Installera paket som tillhandah\(oaller filen
+\fIfil\fR\&.
+.RE
+.PP
+\fB\-\-resource\fR \fIteckensnitt\fR
+.RS 4
+Installera en teckensnittsresurs\&.
+.RE
+.PP
+\fB\-\-catalog\fR \fIfil\fR
+.RS 4
+Installera paketkatalogen i
+\fIfil\fR\&.
+.RE
+.SH "SE OCKS\(oA"
+.RS 4
+Mer information om Apper finns p\(oa \m[blue]\fBAppers hemsida\fR\m[]\&\s-2\u[1]\d\s+2\&.
+.RE
+.RS 4
+kf5options(7)
+.RE
+.RS 4
+qt5options(7)
+.RE
+.SH "UPPHOVSM\(:AN"
+.PP
+Underh\(oallare av Apper \(:ar Daniel Nicoletti
+<dantti12@gmail\&.com>\&. Den h\(:ar manualsidan \(:ar skriven av Matthias Klumpp
+<matthias@tenstral\&.net>\&.
+.SH "AUTHORS"
+.PP
+\fBDaniel Nicoletti\fR <\&dantti12@gmail\&.com\&>
+.RS 4
+Author.
+.RE
+.PP
+\fBMatthias Klumpp\fR <\&matthias@tenstral\&.net\&>
+.RS 4
+Author.
+.RE
+.SH "NOTER"
+.IP " 1." 4
+Appers hemsida
+.RS 4
+\%http://kde-apps.org/content/show.php/Apper?content=84745
+.RE

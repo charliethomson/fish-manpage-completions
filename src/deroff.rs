@@ -1,27 +1,15 @@
 
-// #[cfg(test)]
-// mod benches {
-//     extern crate test;
-//     use super::*;
-//     use test::Bencher;
-//     #[bench]
-//     fn bench_deroff(b: &mut Bencher) {
-//         b.iter(|| {
-//             deroff_files(&["./fixtures/qelectrotech.1".to_owned()]);
-//         })
-//     }
-// }
-
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/deroff.py
 // """ Deroff.py, ported to Python from the venerable deroff.c """
 use libflate::gzip::Decoder;
 use regex::Regex;
 
 use crate::util::TranslationTable;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{ Path, PathBuf };
+use std::path::{Path, PathBuf};
 
 const SKIP_LISTS: bool = false;
 const SKIP_HEADERS: bool = false;
@@ -52,12 +40,10 @@ struct Deroffer {
     inheader: bool,
     pic: bool,
     tbl: bool,
-    tblstate: TblState,
-    tblTab: String,
+    tbl_state: TblState,
+    tbl_tab: String,
     eqn: bool,
-    output: String,
-    skipheaders: bool,
-    skiplists: bool,
+    output: Cell<String>,
     name: String,
 
     s: String, // This is not explicitly defined in python code
@@ -91,12 +77,10 @@ impl Deroffer {
             inheader: false,
             pic: false,
             tbl: false,
-            tblstate: TblState::Options,
-            tblTab: String::new(),
+            tbl_state: TblState::Options,
+            tbl_tab: String::new(),
             eqn: false,
-            output: String::new(),
-            skipheaders: false,
-            skiplists: false,
+            output: Cell::new(String::new()),
             name: String::new(),
 
             s: String::new(), // This is not explicitly defined in python code
@@ -104,7 +88,10 @@ impl Deroffer {
     }
 
     fn get_output(&self) -> String {
-        self.g_re_newline_collapse.replace_all(&self.output, "\n").into()
+        let o = self.output.take();
+        let a = self.g_re_newline_collapse.replace_all(&o, "\n").into();
+        self.output.set(o);
+        a
     }
 
     // for the moment, return small strings, until we figure out what
@@ -387,19 +374,21 @@ impl Deroffer {
     fn str_at(&self, idx: usize) -> &str {
         let s = &self.s;
         s.char_indices()
-            .skip(idx)
-            .next()
+            .nth(idx)
             .map(|(i, c)| &s[i..(i + c.len_utf8())])
             .unwrap_or("")
     }
 
     fn is_white(&self, idx: usize) -> bool {
-        self.str_at(idx).chars().all(|c| c.is_whitespace())
+        match self.str_at(idx) {
+            "" => false,
+            c => c.chars().all(|c| c.is_whitespace()),
+        }
     }
 
     // This is also known as `prch` apparently
     fn not_whitespace(&self, idx: usize) -> bool {
-        !" \t\n".contains(self.s.get(idx..idx + 1).unwrap_or_default())
+        !" \t\n".contains(self.s.get(idx..=idx).unwrap_or_default())
     }
 
     fn digit(&self, idx: usize) -> bool {
@@ -409,10 +398,30 @@ impl Deroffer {
         }
     }
 
+    fn text_arg(&mut self) -> bool {
+        let mut got_something = false;
+        loop {
+            if self.s.is_empty() || self.s.get(0..=0) == Some(" ") {
+                return got_something;
+            } else if let Some("\\") = self.s.get(0..=0) {
+                self.esc_char();
+            } else if let Some(m) = self.g_re_not_backslash_or_whitespace.find(&self.s.clone()) {
+                // Output the characters in the match
+                self.skip_char(m.end());
+                self.condputs(m.as_str());
+                got_something = true;
+            } else if !self.esc_char() {
+                self.condputs(self.str_at(0));
+                self.skip_char(1);
+                got_something = true;
+            }
+        }
+    }
+
     // Replaces the g_macro_dict lookup in the Python code
     fn g_macro_dispatch(&mut self, s: &str) -> bool {
         match s {
-            "SH" => self.macro_sh(),
+            "SH" => self.macro_sh(s),
             "SS" => self.macro_ss_ip(),
             "IP" => self.macro_ss_ip(),
             "H " => self.macro_ss_ip(),
@@ -459,17 +468,15 @@ impl Deroffer {
         }
     }
 
-    // Done by Kevin, not merged >:'(
-    fn macro_sh(&mut self) -> bool {
-        for header_str in [" SYNOPSIS", " \"SYNOPSIS", " ‹BERSICHT", " \"‹BERSICHT"].iter() {
-            if self.s[3..].starts_with(header_str) {
-                self.inheader = true;
-                return true;
-            }
+    fn macro_sh(&mut self, s: &str) -> bool {
+        let headers = [" SYNOPSIS", " \"SYNOPSIS", " ‹BERSICHT", " \"‹BERSICHT"];
+        // @TODO: In the future s[2..] should care about UTF-8
+        if headers.iter().any(|header| s[2..].starts_with(header)) {
+            self.inheader = true;
+        } else {
+            self.inheader = false;
+            self.nobody = true;
         }
-
-        self.inheader = false;
-        self.nobody = true;
         false
     }
 
@@ -481,7 +488,6 @@ impl Deroffer {
 
     // Done by Kevin, not merged >:'(
     fn macro_i_ir(&mut self) -> bool {
-        // why does this exist
         false
     }
 
@@ -539,7 +545,7 @@ impl Deroffer {
 
         if self.is_white(2) {
             self.tbl = true;
-            self.tblstate = TblState::Options;
+            self.tbl_state = TblState::Options;
         }
 
         self.condputs("\n");
@@ -557,7 +563,7 @@ impl Deroffer {
 
         if self.is_white(2) {
             self.tbl = true;
-            self.tblstate = TblState::Format;
+            self.tbl_state = TblState::Format;
         }
 
         self.condputs("\n");
@@ -616,17 +622,9 @@ impl Deroffer {
     }
 
     fn macro_r1(&mut self) -> bool {
-        /*
-        def macro_r1(self):
-            if self.is_white(2):
-                self.refer2 = True
-            self.condputs("\n")
-            return True
-        */
-
         // NOTE: self.refer2 is never used in the python source, so this and macro_r2 are
         // pretty much worthless
-        // if Self::is_white(self.s.as_str(), 2) {
+        // if Self::is_white(&self.s, 2) {
         //     self.refer2 = true;
         // }
         self.condputs("\n");
@@ -634,15 +632,7 @@ impl Deroffer {
     }
 
     fn macro_r2(&mut self) -> bool {
-        /*
-            def macro_r2(self):
-            if self.is_white(2):
-                self.refer2 = False
-            self.condputs("\n")
-            return True
-        */
-
-        // if Self::is_white(self.s.as_str(), 2) {
+        // if Self::is_white(&self.s, 2) {
         //     NOTE: See macro_r1
         //     self.refer2 = false;
         // }
@@ -651,12 +641,6 @@ impl Deroffer {
     }
 
     fn macro_de(&mut self) -> bool {
-        /*
-        def macro_de(self):
-            macro = True
-            self.condputs("\n")
-            return True
-        */
         self.r#macro = true;
         self.condputs("\n");
         true
@@ -679,20 +663,17 @@ impl Deroffer {
     }
 
     fn macro_bv(&mut self) -> bool {
-        /*
-        def macro_bv(self):
-            if self.str_at(2) == "L" and self.white(self.str_at(3)):
-                self.inlist = True
-            self.condputs("\n")
-            return True
-        */
-
-        /*
-        `self.white` doesn't exist in the source, and the argument type is wrong
-        for `self.is_white`, so I don't know what function its supposed to be
-        if self.str_at(2) == "L" and self.white(self.str_at(3)):
-            self.inlist = true
-        } */
+        // TODO: Determine whether `self.white` is a bastardization of
+        // `self.is_white`. (Was self.white converted to self.is_white
+        // but this call site was missed?)
+        //
+        // If it _were_ a valid function, the original Python source
+        // would translate roughly to:
+        //
+        //     for `self.is_white`, so I don't know what function its supposed to be
+        //     if self.str_at(2) == "L" and self.white(self.str_at(3)):
+        //         self.inlist = true
+        //     }
         self.condputs("\n");
         true
     }
@@ -713,61 +694,20 @@ impl Deroffer {
     }
 
     fn macro_lp_pp(&mut self) -> bool {
-        /*
-        def macro_lp_pp(self):
-            self.condputs("\n")
-            return True
-        */
         self.condputs("\n");
         true
     }
 
     fn macro_ds(&mut self) -> bool {
-        /*
-        def macro_ds(self):
-            self.skip_char(2)
-            self.skip_leading_whitespace()
-            if self.str_at(0):
-                # Split at whitespace
-                comps = self.s.split(None, 2)
-                if len(comps) == 2:
-                    name, value = comps
-                    value = value.rstrip()
-                    self.reg_table[name] = value
-            self.condputs("\n")
-            return True
-        */
-
         self.skip_char(2);
         self.skip_leading_whitespace();
 
         if !self.str_at(0).is_empty() {
-            let comps: Vec<String> = self.s.splitn(2, " ").map(|s| s.to_owned()).collect();
+            let comps: Vec<String> = self.s.splitn(2, ' ').map(|s| s.into()).collect();
 
             if comps.len() == 2 {
-                let name: String = comps.get(0).unwrap().to_owned();
-                /*
-                This is a reminder to google stuff before you go implementing stuff badly
-
-                // This is horrible I know but it's meant to do string.rstrip()
-                // If you can think of a better way I am more than willing to switch it
-                let value: String = comps
-                            .get(1)
-                            .unwrap() // This is safe (len 2)
-                            .chars()
-                            .rev() // reverse the string to get the right side
-                            .skip_while(|c| c.is_whitespace()) // Skip any whitespace
-                            .collect::<String>() // collect it
-                            .chars()
-                            .rev() // make the string face the right way
-                            .collect(); // put it back in a String
-                // A note on the badness of this code,
-                // The reason for `.collect().rev().chars().collect()` exists is
-                // `skip_while` returns a `SkipWhile` which doesnt impl `DoubleEndedIterator`
-                // which is required for `rev` :( */
-
-                let value = comps.get(1).unwrap().as_str().trim_end().to_owned();
-
+                let name: String = comps.get(0).unwrap().into();
+                let value = comps.get(1).unwrap().trim_end().into();
                 self.reg_table.insert(name, value);
             }
         }
@@ -778,55 +718,41 @@ impl Deroffer {
 
     // Done by Kevin, not merged >:'(
     fn macro_so_nx(&mut self) -> bool {
-        /*  # We always ignore include directives
-        # deroff.c for some reason allowed this to fall through to the 'tr' case
-        # I think that was just a bug so I won't replicate it */
         true
     }
 
     // Done by Anders, not merged >:'(
     fn macro_tr(&mut self) -> bool {
-        let s = &self.s.clone();
         self.skip_char(2);
         self.skip_leading_whitespace();
-        while !s.is_empty() && &s[0..=0] != "\n" {
-            let c = &s[0..=0];
-            let mut ns = &s[1..=1];
-            self.skip_char(2);
-            if ns.is_empty() || ns == "\n" {
-                ns = " ";
-            }
 
-            self.tr_from.push_str(c);
-            self.tr_to.push_str(ns);
+        while !self.s.is_empty() && &self.s[0..=0] != "\n" {
+            self.tr_from.push_str(&self.s[0..=0]);
+
+            let ns = &self.s[1..=1];
+            self.tr_to
+                .push_str(if ns.is_empty() || ns == "\n" { " " } else { ns });
+
+            self.skip_char(2);
         }
 
         // Update our table, then swap in the slower tr-savvy condputs
         self.tr = match TranslationTable::new(&self.tr_from, &self.tr_to) {
             Ok(table) => Some(table),
-            Err(e) => panic!("Encountered an error creating a new translation table from {}, {}: {}", self.tr_from, self.tr_to, e),
+            Err(e) => panic!(
+                "Encountered an error creating a new translation table from {}, {}: {}",
+                self.tr_from, self.tr_to, e
+            ),
         };
         true
     }
 
     fn macro_sp(&mut self) -> bool {
-        /*
-        def macro_sp(self):
-            self.condputs("\n")
-            return True
-        */
-
         self.condputs("\n");
         true
     }
 
     fn macro_other(&mut self) -> bool {
-        /*
-        def macro_other(self):
-            self.condputs("\n")
-            return True
-        */
-
         self.condputs("\n");
         true
     }
@@ -835,16 +761,18 @@ impl Deroffer {
     /// if `self.tr` is set, instead of putting `s` into `self.output` directly,
     /// it `translate`s it using the set translation table and puts the result
     /// into `self.output`
-    fn condputs(&mut self, s: &str) {
+    fn condputs(&self, s: &str) {
         let is_special =
             { self.pic || self.eqn || self.refer || self.r#macro || self.inlist || self.inheader };
 
         if !is_special {
+            let mut o = self.output.take();
             if let Some(table) = &self.tr {
-                self.output.push_str(&table.translate(s.into()));
+                o.push_str(&table.translate(s));
             } else {
-                self.output.push_str(s);
+                o.push_str(s);
             }
+            self.output.set(o);
         }
     }
 
@@ -862,10 +790,10 @@ impl Deroffer {
     // Thanks Steve, I only modified it a little, like, completely
     fn esc_char(&mut self) -> bool {
         self.s
-            .clone()
-            .get(0..1)
+            .chars()
+            .next()
             .and_then(|ch| {
-                if ch == "\\" {
+                if ch == '\\' {
                     Some(self.esc_char_backslash())
                 } else {
                     Some(self.word() || self.number())
@@ -879,8 +807,7 @@ impl Deroffer {
             self.skip_char(1);
             while !self.s.is_empty() && self.str_at(0) != "\"" {
                 if !self.esc_char() {
-                    // There's another check for s being empty here, but it "should" be safe w/o it
-                    self.condputs(&self.s.clone()[0..=0]);
+                    self.condputs(self.str_at(0));
                     self.skip_char(1);
                 }
             }
@@ -921,7 +848,7 @@ impl Deroffer {
         };
 
         self.nobody = false;
-        let s0s1 = self.s.clone().chars().take(2).collect::<String>();
+        let s0s1 = self.s.chars().take(2).collect::<String>();
 
         if self.g_macro_dispatch(s0s1.as_str()) {
             return true;
@@ -973,12 +900,7 @@ impl Deroffer {
         // In the python, it has a check that is already handled in esc_char_backslash, which is
         // the only place it gets called, so I'll omit that check here
 
-        // This is written as `self.macro += 1` in the source, but I dont know why
-        // it does the same thing (false -> true, true -> still true) :shrug:
-        // self.r#macro = true;
-        // Upon further investigation, this is the weirdest function ever
-        // This is just a state placeholder thing
-        let mut m = self.r#macro as u8 + 1;
+        let m = self.r#macro as u8 + 1;
 
         self.skip_char(3);
 
@@ -993,31 +915,9 @@ impl Deroffer {
             self.skip_char(1);
         }
 
-        m -= 1;
-        self.r#macro = m != 0;
+        self.r#macro = m - 1 != 0;
 
         true
-    }
-
-    // Rami wrote this originally, but I had to do a lot of work on it, soz
-    fn text_arg(&mut self) -> bool {
-        let mut got_something = false;
-        loop {
-            if self.s.is_empty() || self.s.get(0..=0) == Some(" ") {
-                return got_something;
-            } else if let Some("\\") = self.s.get(0..=0) {
-                self.esc_char();
-            } else if let Some(m) = self.g_re_not_backslash_or_whitespace.find(&self.s.clone()) {
-                // Output the characters in the match
-                self.skip_char(m.end());
-                self.condputs(m.as_str());
-                got_something = true;
-            } else if !self.esc_char() {
-                self.condputs(self.s.clone().get(0..=0).unwrap_or(""));
-                self.skip_char(1);
-                got_something = true;
-            }
-        }
     }
 
     // This function is the worst, there are a few comments explaining some of it in the test (test_var)
@@ -1126,11 +1026,11 @@ impl Deroffer {
 
     fn text(&mut self) -> bool {
         loop {
-            if let Some(idx) = self.s.clone().find("\\") {
-                self.condputs(self.s.clone().get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
+            if let Some(idx) = self.s.find('\\') {
+                self.condputs(self.s.get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
                 self.skip_char(idx);
                 if !self.esc_char_backslash() {
-                    self.condputs(self.s.clone().get(0..1).unwrap_or("")); // TODO: Fix! this may cause bugs later
+                    self.condputs(self.str_at(0)); // TODO: Fix! this may cause bugs later
                     self.skip_char(1);
                 }
             } else {
@@ -1144,7 +1044,10 @@ impl Deroffer {
 
     fn spec(&mut self) -> bool {
         self.specletter = false;
-        if self.s.get(0..2).unwrap_or("") == "\\(" && self.not_whitespace(2) && self.not_whitespace(3) {
+        if self.s.get(0..2).unwrap_or("") == "\\("
+            && self.not_whitespace(2)
+            && self.not_whitespace(3)
+        {
             let key = self.s.get(2..4).unwrap_or("");
             if let Some(k) = Deroffer::g_specs_specletter(key) {
                 self.condputs(k);
@@ -1180,7 +1083,7 @@ impl Deroffer {
     }
 
     fn do_tbl(&mut self) -> bool {
-        match self.tblstate {
+        match self.tbl_state {
             TblState::Options => {
                 while !self.s.is_empty() && ";\n".contains(&self.s[0..=0]) {
                     self.skip_leading_whitespace();
@@ -1209,7 +1112,7 @@ impl Deroffer {
                         }
 
                         if !arg.is_empty() {
-                            if arg.find(")") == None {
+                            if arg.find(')') == None {
                                 arg = arg[..idx].to_owned();
                             }
                             self.s = self.s[idx + 1..].to_owned();
@@ -1219,12 +1122,12 @@ impl Deroffer {
                         }
 
                         if option.to_lowercase() == "tab" {
-                            self.tblTab = arg[0..=0].to_owned();
+                            self.tbl_tab = arg[0..=0].to_owned();
                         }
                     }
                 }
 
-                self.tblstate = TblState::Format;
+                self.tbl_state = TblState::Format;
                 self.condputs("\n");
             }
             TblState::Format => {
@@ -1236,14 +1139,14 @@ impl Deroffer {
                 }
 
                 if self.str_at(0) == "." {
-                    self.tblstate = TblState::Data;
+                    self.tbl_state = TblState::Data;
                 }
 
                 self.condputs("\n");
             }
             TblState::Data => {
-                if !self.tblTab.is_empty() {
-                    self.s = self.s.replace(&self.tblTab, "\t");
+                if !self.tbl_tab.is_empty() {
+                    self.s = self.s.replace(&self.tbl_tab, "\t");
                 }
 
                 self.text();
@@ -1264,14 +1167,16 @@ impl Deroffer {
     }
 
     fn deroff(&mut self, string: String) {
-        for line in string.split("\n") {
+        for line in string.split('\n') {
             let mut line = line.to_owned();
             line.push('\n');
             self.s = line;
             if !self.do_line() {
                 break;
             }
+            eprintln!("aaa {}", self.s);
         }
+        eprintln!("Fin: {}", self.output.take());
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
@@ -1282,16 +1187,24 @@ impl Deroffer {
 fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Result<()> {
     if !output_dir.as_ref().exists() {
         eprintln!("output dir doesn't exist, creating one for you");
-        std::fs::create_dir_all(output_dir.as_ref());
+        std::fs::create_dir_all(output_dir.as_ref())?;
     }
     for arg in files {
         let mut file = File::open(arg)?;
         let mut string = String::new();
         if arg.ends_with(".gz") {
-            let mut decoder = Decoder::new(file).unwrap();
+            let mut decoder = Decoder::new(file)?;
             decoder.read_to_string(&mut string)?;
         } else {
-            file.read_to_string(&mut string)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            string = String::from_utf8(bytes).unwrap_or_else(|bytes| {
+                let mut buffer = String::new();
+                for b in bytes.into_bytes() {
+                    buffer.push(b as char);
+                }
+                buffer
+            });
         }
         let mut d = Deroffer::new();
 
@@ -1313,9 +1226,9 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
 #[test]
 fn test_get_output() {
     let mut deroffer = Deroffer::new();
-    deroffer.output = "foo\n\nbar".into();
+    deroffer.output.set("foo\n\nbar".into());
     assert_eq!(&deroffer.get_output(), "foo\n\nbar");
-    deroffer.output = "foo\n\n\nbar".into();
+    deroffer.output.set("foo\n\n\nbar".into());
     assert_eq!(&deroffer.get_output(), "foo\nbar");
 }
 
@@ -1362,26 +1275,39 @@ fn test_is_white() {
 fn test_condputs() {
     let mut d = Deroffer::new();
 
-    assert_eq!(d.output, String::new());
+    let o = d.output.take();
+    assert_eq!(o, String::new());
+    d.output.set(o);
+
     d.condputs("Hello World!\n");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
+
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
+
     d.pic = true;
     d.condputs("This won't go to output");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
+
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
+
     d.pic = false;
     d.condputs("This will go to output :)");
-    assert_eq!(
-        d.output,
-        "Hello World!\nThis will go to output :)".to_owned()
-    );
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\nThis will go to output :)".to_owned());
+    d.output.set(o);
 
     // Test the translation check
     d.tr = TranslationTable::new("Ttr", "AAA").ok();
     d.condputs("Translate test");
+
+    let o = d.output.take();
     assert_eq!(
-        d.output,
+        o,
         "Hello World!\nThis will go to output :)AAanslaAe AesA".to_owned()
     );
+    d.output.set(o);
 }
 
 #[test]
@@ -1441,7 +1367,9 @@ fn test_var() {
         .insert("tr".to_owned(), "Hello World!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " World!");
-    assert!(d.output.contains("Hello"));
+    let o = d.output.take();
+    assert!(o.contains("Hello"));
+    d.output.set(o);
 
     d.s = "\\*(aaHello World!".to_owned();
     assert!(d.var() == false);
@@ -1474,7 +1402,9 @@ fn test_var() {
         .insert("test_reg".to_owned(), "It me!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " me!");
-    assert!(d.output.contains("It"));
+    let o = d.output.take();
+    assert!(o.contains("It"));
+    d.output.set(o);
 
     // no "]"
     d.s = "\\*[foo bar :)".to_owned();
@@ -1546,11 +1476,17 @@ fn test_var() {
 
 #[test]
 fn test_deroff() {
-    deroff_files(&[
-            "./fixtures/docker-rmi.1".to_owned(),
-            "./fixtures/qelectrotech.1".to_owned(),
-            "./fixtures/mlterm.1".to_owned(),
+    deroff_files(
+        &[
+            // "./fixtures/docker-rmi.1".to_owned(),
+            // "./fixtures/qelectrotech.1".to_owned(),
+            // "./fixtures/mlterm.1".to_owned(),
+            // "./fixtures/aaxine.1".to_owned(),
+            // "./fixtures/apper.1".to_owned(),
+            // "./fixtures/chsh.1".to_owned(),
+            "./fixtures/aria2c.1".to_owned(),
         ],
-        "test_deroff"
-    ).unwrap();
+        "test_deroff",
+    )
+    .unwrap();
 }

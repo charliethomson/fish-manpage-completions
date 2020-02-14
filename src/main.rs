@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use itertools::Itertools;
+use regex::Regex;
 use structopt::StructOpt;
 
 #[cfg(test)]
@@ -160,9 +161,9 @@ impl App {
 //         data = data[1:len(data)-1]
 //     return data
 
-fn unquote_double_quotes(data: String) -> String {
+fn unquote_double_quotes(data: &str) -> &str {
     if data.len() > 2 && (data.as_bytes()[0], *data.as_bytes().last().unwrap()) == (b'"', b'"') {
-        data[1..(data.len() - 1)].into()
+        &data[1..(data.len() - 1)]
     } else {
         data
     }
@@ -175,15 +176,15 @@ fn unquote_double_quotes(data: String) -> String {
 //         data = data[1:len(data)-1]
 //     return data
 
-fn unquote_single_quotes(data: String) -> String {
+fn unquote_single_quotes(data: &str) -> &str {
     if data.len() > 2 && (data.as_bytes()[0], *data.as_bytes().last().unwrap()) == (b'\'', b'\'') {
-        data[1..(data.len() - 1)].into()
+        &data[1..(data.len() - 1)]
     } else {
         data
     }
 }
 
-fn fish_escape_single_quote(string: String) -> String {
+fn fish_escape_single_quote(string: &str) -> String {
     format!("'{}'", string.replace(r"\", r"\\").replace(r"'", r"\'"))
 }
 
@@ -246,7 +247,7 @@ fn fish_options(options: &str, existing_options: &mut HashSet<String>) -> Vec<St
 
         let (fish_opt, num_dashes) = if option.starts_with("--") {
             ("l", 2)
-        } else if option.starts_with("-") {
+        } else if option.starts_with('-') {
             (if option.len() == 2 { "s" } else { "o" }, 1)
         } else {
             continue;
@@ -257,7 +258,7 @@ fn fish_options(options: &str, existing_options: &mut HashSet<String>) -> Vec<St
             fish_opt,
             // Direct indexing of `option` won't panic due to how `num_dashes`
             // is calculated. (I promise!)
-            fish_escape_single_quote(String::from(&option[num_dashes..]))
+            fish_escape_single_quote(&option[num_dashes..])
         );
 
         if existing_options.insert(option.clone()) {
@@ -347,7 +348,7 @@ fn truncated_description(description: &str) -> String {
     let sentences = description.replace(r"\'", "'").replace(r"\.", ".");
 
     let mut sentences = sentences
-        .split(".")
+        .split('.')
         .filter(|sentence| !sentence.trim().is_empty());
 
     let mut out = format!(
@@ -372,7 +373,7 @@ fn truncated_description(description: &str) -> String {
         }
     }
 
-    fish_escape_single_quote(out)
+    fish_escape_single_quote(&out)
 }
 
 #[test]
@@ -417,7 +418,7 @@ fn built_command(
     description: &str,
     built_command_output: &mut Vec<String>,
     existing_options: &mut HashSet<String>,
-    cmd_name: String,
+    cmd_name: &str,
 ) {
     let fish_options = fish_options(options, existing_options);
 
@@ -588,80 +589,99 @@ impl ManParser for Type1 {
 //             options_section = options_section[options_matched.end()-3:]
 //             options_matched = re.search(options_parts_regex, options_section)
 
-//     def fallback(self, options_section):
-//         add_diagnostic('Trying fallback')
-//         options_parts_regex = re.compile("\.TP( \d+)?(.*?)\.TP", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         if options_matched == None:
-//             add_diagnostic('Still not found')
-//             return False
-//         while options_matched != None:
-//             data = options_matched.group(2)
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//             if (len(data)>1 and len(data[1].strip())>0): # and len(data[1])<400):
-//                 optionName = data[0].strip()
-//                 if ( optionName.find("-") == -1):
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-//         return True
-
 impl Type1 {
-    fn fallback(&self, options_section: &str) -> bool {
-        unimplemented!()
+    fn fallback(
+        self,
+        mut options_section: &str,
+        built_command_output: &mut Vec<String>,
+        existing_options: &mut HashSet<String>,
+        cmd_name: &str,
+    ) -> bool {
+        // add_diagnostic("Trying fallback");
+        let options_parts_re = regex!(r"\.TP( \d+)?((?s:.)*?)\.TP");
+        let mut options_matched = options_parts_re.captures(options_section);
+        if options_matched.is_none() {
+            // add_diagnostic("Still not found");
+            return false;
+        }
+        while let Some(mat) = options_matched {
+            let data = mat.get(2).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            let data: Vec<&str> = data.trim().splitn(2, '\n').collect();
+            if data.len() < 2 || data[1].trim().is_empty() {
+                // add_diagnostic("Unable to split option from description");
+                return false;
+            }
+            let option_name = data[0].trim();
+            if option_name.find('-').is_some() {
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                let option_desc = data[1].trim().replace('\n', " ");
+                built_command(
+                    option_name,
+                    option_desc.as_str(),
+                    built_command_output,
+                    existing_options,
+                    cmd_name,
+                );
+            } else {
+                // add_diagnostic(format!("{:?} does not contain '-'", option_name));
+            }
+            // XXX possible to add fallback2 here
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        true
     }
-}
 
-//     def fallback2(self, options_section):
-//         add_diagnostic('Trying last chance fallback')
-//         ix_remover_regex = re.compile("\.IX.*")
-//         trailing_num_regex = re.compile('\\d+$')
-//         options_parts_regex = re.compile("\.IP (.*?)\.IP", re.DOTALL)
-//
-//         options_section = re.sub(ix_remover_regex, "", options_section)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         if options_matched == None:
-//             add_diagnostic('Still (still!) not found')
-//             return False
-//         while options_matched != None:
-//             data = options_matched.group(1)
-//
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//             if (len(data)>1 and len(data[1].strip())>0): # and len(data[1])<400):
-//                 optionName = re.sub(trailing_num_regex, "", data[0].strip())
-//
-//                 if ('-' not in optionName):
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = optionName.strip()
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-//         return True
+    fn fallback2(
+        self,
+        options_section: &str,
+        built_command_output: &mut Vec<String>,
+        existing_options: &mut HashSet<String>,
+        cmd_name: &str,
+    ) -> bool {
+        // add_diagnostic("Trying last chance fallback");
+        let ix_remover_re = regex!(r"\.IX.*");
+        let trailing_num_re = regex!(r"\d+$");
+        let options_parts_re = regex!(r"\.IP ((?s:.)*?)\.IP");
 
-impl Type1 {
-    fn fallback2(&self, options_section: &str) -> bool {
-        unimplemented!()
+        let mut options_section = &*ix_remover_re.replace_all(options_section, "");
+        let mut options_matched = options_parts_re.captures(&options_section);
+        if options_matched.is_none() {
+            // add_diagnostic("Still (still!) not found");
+            return false;
+        }
+        while let Some(mat) = options_matched {
+            let data = mat.get(1).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            let data: Vec<&str> = data.trim().splitn(2, '\n').collect();
+            if data.len() < 2 || data[1].trim().is_empty() {
+                // add_diagnostic("Unable to split option from description");
+                return false;
+            }
+            let option_name = trailing_num_re.replace_all(data[0].trim(), "");
+            if option_name.find('-').is_some() {
+                let option_name = option_name.trim();
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                let option_desc = data[1].trim().replace('\n', " ");
+                built_command(
+                    option_name,
+                    option_desc.as_str(),
+                    built_command_output,
+                    existing_options,
+                    cmd_name,
+                );
+            } else {
+                // add_diagnostic(format!("{:?} doesn't contain '-'", option_name));
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(&options_section);
+        }
+        true
     }
 }
 
@@ -1028,7 +1048,7 @@ fn test_TypeDeroff_is_option() {
 
 impl TypeDeroff {
     fn is_option(line: &str) -> bool {
-        line.starts_with("-")
+        line.starts_with('-')
     }
 }
 
@@ -1041,7 +1061,7 @@ fn test_could_be_description() {
 
 impl TypeDeroff {
     fn could_be_description(line: &str) -> bool {
-        line.len() > 0 && !line.starts_with("-")
+        !line.is_empty() && !line.starts_with('-')
     }
 }
 
@@ -1137,9 +1157,7 @@ fn file_is_overwritable(path: &Path) -> Result<bool, String> {
     Ok(file
         .split(b'\n')
         .map(|line| {
-            // Okay to panic via `expect` here since we've already verified
-            // that we can open the file for reading.
-            bstr::B(&line.expect(&format!("I/O error encountered reading {}", display)))
+            bstr::B(&line.unwrap_or_else(|_| panic!("I/O error encountered reading {}", display)))
                 .trim()
                 .to_owned()
         })
@@ -1697,8 +1715,10 @@ mod tests {
     impl FileKind {
         fn content(self) -> &'static [u8] {
             match self {
-                FileKind::Good => b"    \n#Hello, world!\
-                    \n#Hello, world! Autogenerated      ",
+                FileKind::Good => {
+                    b"    \n#Hello, world!\
+                    \n#Hello, world! Autogenerated      "
+                }
                 FileKind::Bad => b"    Autogenerated     ",
             }
         }
