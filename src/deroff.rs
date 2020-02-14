@@ -488,7 +488,7 @@ impl Deroffer {
     // Done by Kevin, not merged >:'(
     fn macro_nm(&mut self) -> bool {
         if self.s == "Nm\n" {
-            self.condputs(self.name);
+            self.condputs(&self.name.clone());
         } else {
             let mut s = self.s[3..].trim().to_owned();
             s.push(' ');
@@ -1275,7 +1275,7 @@ impl Deroffer {
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
-        write!(write, "{}", self.output).expect("FAILED TO WRITE OUT");
+        write!(write, "{}", self.get_output()).expect("FAILED TO WRITE OUT");
     }
 }
 
