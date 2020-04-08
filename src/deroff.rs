@@ -1174,9 +1174,7 @@ impl Deroffer {
             if !self.do_line() {
                 break;
             }
-            eprintln!("aaa {}", self.s);
         }
-        eprintln!("Fin: {}", self.output.take());
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
@@ -1222,6 +1220,7 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
     }
     Ok(())
 }
+
 
 #[test]
 fn test_get_output() {
@@ -1478,13 +1477,13 @@ fn test_var() {
 fn test_deroff() {
     deroff_files(
         &[
-            // "./fixtures/docker-rmi.1".to_owned(),
-            // "./fixtures/qelectrotech.1".to_owned(),
-            // "./fixtures/mlterm.1".to_owned(),
-            // "./fixtures/aaxine.1".to_owned(),
-            // "./fixtures/apper.1".to_owned(),
-            // "./fixtures/chsh.1".to_owned(),
-            "./fixtures/aria2c.1".to_owned(),
+            "./fixtures/docker-rmi.1".to_owned(),
+            "./fixtures/qelectrotech.1".to_owned(),
+            "./fixtures/mlterm.1".to_owned(),
+            "./fixtures/aaxine.1".to_owned(),
+            "./fixtures/apper.1".to_owned(),
+            "./fixtures/chsh.1".to_owned(),
+            // "./fixtures/aria2c.1".to_owned(),
         ],
         "test_deroff",
     )
