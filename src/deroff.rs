@@ -869,12 +869,12 @@ impl Deroffer {
 
         loop {
             if !self.quoted_arg() && !self.text_arg() {
-                if !self.s.is_empty() {
+                if self.s.is_empty() {
+                    return true;
+                } else {
                     let s = &self.str_at(0).to_owned();
                     self.condputs(s);
                     self.skip_char(1);
-                } else {
-                    return true;
                 }
             }
         }
@@ -1197,11 +1197,13 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
             string = String::from_utf8(bytes).unwrap_or_else(|bytes| {
-                let mut buffer = String::new();
-                for b in bytes.into_bytes() {
-                    buffer.push(b as char);
-                }
-                buffer
+                bytes
+                    .into_bytes()
+                    .iter()
+                    .fold(String::new(), |mut acc, byte| {
+                        acc.push(*byte as char);
+                        acc
+                    })
             });
         }
         let mut d = Deroffer::new();
