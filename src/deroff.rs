@@ -1,4 +1,3 @@
-
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/deroff.py
 // """ Deroff.py, ported to Python from the venerable deroff.c """
 use libflate::gzip::Decoder;
@@ -1222,7 +1221,6 @@ fn deroff_files<P: AsRef<Path>>(files: &[String], output_dir: P) -> std::io::Res
     }
     Ok(())
 }
-
 
 #[test]
 fn test_get_output() {
