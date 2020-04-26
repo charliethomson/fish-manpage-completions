@@ -3,7 +3,7 @@
 use libflate::gzip::Decoder;
 use regex::Regex;
 
-use crate::util::TranslationTable;
+use crate::util::{CellMap, TranslationTable};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -87,10 +87,8 @@ impl Deroffer {
     }
 
     fn get_output(&self) -> String {
-        let o = self.output.take();
-        let a = self.g_re_newline_collapse.replace_all(&o, "\n").into();
-        self.output.set(o);
-        a
+        self.output
+            .map_(|output| self.g_re_newline_collapse.replace_all(&output, "\n").into())
     }
 
     // for the moment, return small strings, until we figure out what
@@ -1274,39 +1272,28 @@ fn test_is_white() {
 fn test_condputs() {
     let mut d = Deroffer::new();
 
-    let o = d.output.take();
-    assert_eq!(o, String::new());
-    d.output.set(o);
+    assert!(d.output.map_(|o| o.is_empty()));
 
     d.condputs("Hello World!\n");
 
-    let o = d.output.take();
-    assert_eq!(o, "Hello World!\n".to_owned());
-    d.output.set(o);
+    assert!(d.output.map_(|o| o == "Hello World!\n"));
 
     d.pic = true;
     d.condputs("This won't go to output");
 
-    let o = d.output.take();
-    assert_eq!(o, "Hello World!\n".to_owned());
-    d.output.set(o);
+    assert!(d.output.map_(|o| o == "Hello World!\n"));
 
-    d.pic = false;
-    d.condputs("This will go to output :)");
-    let o = d.output.take();
-    assert_eq!(o, "Hello World!\nThis will go to output :)".to_owned());
-    d.output.set(o);
+    assert!(d
+        .output
+        .map_(|o| o == "Hello World!\nThis will go to output :)"));
 
     // Test the translation check
     d.tr = TranslationTable::new("Ttr", "AAA").ok();
     d.condputs("Translate test");
 
-    let o = d.output.take();
-    assert_eq!(
-        o,
-        "Hello World!\nThis will go to output :)AAanslaAe AesA".to_owned()
-    );
-    d.output.set(o);
+    assert!(d
+        .output
+        .map_(|o| o == "Hello World!\nThis will go to output :)AAanslaAe AesA"));
 }
 
 #[test]
@@ -1366,9 +1353,7 @@ fn test_var() {
         .insert("tr".to_owned(), "Hello World!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " World!");
-    let o = d.output.take();
-    assert!(o.contains("Hello"));
-    d.output.set(o);
+    assert!(d.output.map_(|o| o.contains("Hello")));
 
     d.s = "\\*(aaHello World!".to_owned();
     assert!(d.var() == false);
@@ -1401,9 +1386,7 @@ fn test_var() {
         .insert("test_reg".to_owned(), "It me!".to_owned());
     assert!(d.var() == true);
     assert!(d.s == " me!");
-    let o = d.output.take();
-    assert!(o.contains("It"));
-    d.output.set(o);
+    assert!(d.output.map_(|o| o.contains("It")));
 
     // no "]"
     d.s = "\\*[foo bar :)".to_owned();
