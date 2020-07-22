@@ -9,6 +9,8 @@ macro_rules! regex {
 }
 
 use crate::char_len;
+use encoding_rs_io::DecodeReaderBytes;
+use std::io::Read;
 use std::{collections::HashMap, iter::FromIterator};
 
 pub struct TranslationTable {
@@ -82,4 +84,24 @@ fn test_translationtable_translate() {
         tr.translate("This 🚁 is a helicopter!"),
         "This h is a helicopter!".to_owned(),
     )
+}
+
+pub fn decode_bytes(bytes: &[u8]) -> std::io::Result<String> {
+    let mut decoder = DecodeReaderBytes::new(bytes);
+    let mut dest = String::new();
+    decoder.read_to_string(&mut dest)?;
+    Ok(dest)
+}
+
+#[test]
+fn test_decode_bytes() {
+    // 안녕하세요 세계
+    let mut bytes = [
+        0xFF, 0xB7, 0xFF, 0xC2, 0xFF, 0xA4, 0xFF, 0xA4, 0xFF, 0xCA, 0xFF, 0xB7, 0xFF, 0xBE, 0xFF,
+        0xC2, 0xFF, 0xB5, 0xFF, 0xC7, 0xFF, 0xB7, 0xFF, 0xD2, 0xFF, 0xB5, 0xFF, 0xC7, 0xFF, 0xFF,
+        0xA1, 0xFF, 0xCB,
+    ];
+
+    let result = decode_bytes(&bytes).unwrap();
+    assert_eq!(result, "안녕하세요 세계");
 }

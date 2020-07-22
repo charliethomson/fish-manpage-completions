@@ -13,6 +13,7 @@ bstr = "*"
 flate2 = "1.0"
 bzip2 = "0.3"
 xz2 = "0.1"
+encoding_rs_io = "0.1.7"
 
 [dev-dependencies]
 pretty_assertions = "*"
