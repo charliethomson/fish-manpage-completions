@@ -1150,40 +1150,53 @@ fn test_comment() {
     assert_eq!(deroffer.s, "\nworld".to_owned());
 }
 
-fn deroff_files(files: &[String]) -> io::Result<()> {
-    for arg in files {
-        eprintln!("{}", arg);
-        let mut file = File::open(arg)?;
-        let mut string = String::new();
-        if arg.ends_with(".gz") {
-            let mut decoder = GzDecoder::new(file);
-            decoder.read_to_string(&mut string)?;
-        } else {
-            match file.read_to_string(&mut string) {
-                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                    // not valid UTF-8
-                    // TODO: This is a _bad_ workaround for latin1, we need to correctly decode input files
-                    let mut bytes = Vec::new();
-                    file.read_to_end(&mut bytes)?;
+pub mod prelude {
+    use std::{
+        fs::{metadata, read_dir, File},
+        io::{self, Read, Write},
+        path::{Path, PathBuf},
+    };
 
-                    for byte in bytes {
-                        string.push(byte as char);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("unknown error {:?}", e);
-                    continue;
-                }
-                Ok(_) => {}
-            };
-        }
+    use super::Deroffer;
 
+    pub fn deroff_str<S: ToString>(s: S) -> String {
         let mut deroffer = Deroffer::new();
-        deroffer.deroff(string);
-        deroffer.flush_output(io::stdout());
+        deroffer.deroff(s.to_string());
+        deroffer.get_output()
     }
 
-    Ok(())
+    pub fn deroff_file<P: AsRef<Path>>(path: P) -> io::Result<String> {
+        // TODO: Encoding
+        // let mut bytes = vec![];
+        // input_file.read_to_end(&mut bytes)?;
+        let mut input_str = String::new();
+        let mut input_file = File::open(path.as_ref())?;
+        // TODO: We assume input_file is UTF-8, we need to not do that
+        input_file.read_to_string(&mut input_str)?;
+        Ok(deroff_str(input_str))
+    }
+
+    pub fn deroff_files<P: AsRef<Path>>(path: P) -> io::Result<Vec<(PathBuf, String)>> {
+        let metadata = metadata(path.as_ref())?;
+
+        if !metadata.is_dir() {
+            // if the path exists and is not a directory, it's a file, pass it down
+            let output = deroff_file(path.as_ref())?;
+            Ok(vec![(path.as_ref().to_path_buf(), output)])
+        } else {
+            let mut output = vec![];
+            // path is a dir, process as such
+            for manpage_path in read_dir(path)? {
+                // We assume that `manpage_path` is a file
+                // TODO: Consider recursive
+                let path = manpage_path?.path();
+                let output_str = deroff_file(&path)?;
+                output.push((path, output_str));
+            }
+
+            Ok(output)
+        }
+    }
 }
 
 #[test]
