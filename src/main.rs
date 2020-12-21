@@ -1,14 +1,17 @@
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/create_manpage_completions.py
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fmt};
 
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
 use itertools::Itertools;
 use structopt::StructOpt;
+use xz2::read::XzDecoder;
 
 #[cfg(test)]
 use pretty_assertions::{assert_eq, assert_ne};
@@ -157,9 +160,9 @@ impl App {
 //         data = data[1:len(data)-1]
 //     return data
 
-fn unquote_double_quotes(data: String) -> String {
+fn unquote_double_quotes(data: &str) -> &str {
     if data.len() > 2 && (data.as_bytes()[0], *data.as_bytes().last().unwrap()) == (b'"', b'"') {
-        data[1..(data.len() - 1)].into()
+        &data[1..(data.len() - 1)]
     } else {
         data
     }
@@ -172,18 +175,26 @@ fn unquote_double_quotes(data: String) -> String {
 //         data = data[1:len(data)-1]
 //     return data
 
-fn unquote_single_quotes(data: String) -> String {
+fn unquote_single_quotes(data: &str) -> &str {
     if data.len() > 2 && (data.as_bytes()[0], *data.as_bytes().last().unwrap()) == (b'\'', b'\'') {
-        data[1..(data.len() - 1)].into()
+        &data[1..(data.len() - 1)]
     } else {
         data
     }
 }
 
-fn fish_escape_single_quote(string: String) -> String {
-    format!("'{}'", string.replace(r"\", r"\\").replace(r"'", r"\'"))
+fn fish_escape_single_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_+-|/:=@~".contains(c))
+    {
+        String::from(s)
+    } else {
+        format!("'{}'", s.replace(r"\", r"\\").replace(r"'", r"\'"))
+    }
 }
 
+// Rust port replaced with String::from_utf8_lossy(s.as_bytes())
+//
 // # Make a string Unicode by attempting to decode it as latin-1, or UTF8. See #658
 // def lossy_unicode(s):
 //     # All strings are unicode in Python 3
@@ -198,20 +209,16 @@ fn fish_escape_single_quote(string: String) -> String {
 //         pass
 //     return s.decode('latin-1', 'ignore')
 
-fn lossy_unicode(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).to_string()
-}
-
-#[test]
-fn test_lossy_unicode() {
-    let bytes = b"123 456";
-    let s = lossy_unicode(bytes);
-    assert_eq!("123 456", s);
-
-    let bad_bytes = &[255];
-    let bad_s = lossy_unicode(bad_bytes);
-    assert_eq!("�", bad_s);
-}
+// #[test]
+// fn test_lossy_unicode() {
+//     let bytes = b"123 456";
+//     let s = lossy_unicode(bytes);
+//     assert_eq!("123 456", s);
+//
+//     let bad_bytes = &[255];
+//     let bad_s = lossy_unicode(bad_bytes);
+//     assert_eq!("�", bad_s);
+// }
 
 const MAX_DESCRIPTION_WIDTH: usize = 78;
 const TRUNCATION_SUFFIX: char = '…';
@@ -254,7 +261,7 @@ fn fish_options(options: &str, existing_options: &mut HashSet<String>) -> Vec<St
             fish_opt,
             // Direct indexing of `option` won't panic due to how `num_dashes`
             // is calculated. (I promise!)
-            fish_escape_single_quote(String::from(&option[num_dashes..]))
+            fish_escape_single_quote(&option[num_dashes..])
         );
 
         if existing_options.insert(option.clone()) {
@@ -267,42 +274,50 @@ fn fish_options(options: &str, existing_options: &mut HashSet<String>) -> Vec<St
 
 #[test]
 fn test_fish_options() {
-    {
-        let expected_output: Vec<String> = vec!["-s 'f'".into(), "-l 'force'".into()];
-        let options = "-f, --force[=false]";
-        let mut existing_options: HashSet<String> = Default::default();
-        assert_eq!(
-            fish_options(options, &mut existing_options),
-            expected_output
-        );
-        assert_eq!(
-            expected_output.iter().cloned().collect::<HashSet<_>>(),
-            existing_options
-        );
-    }
+    use std::iter::once;
 
-    {
-        use std::iter::once;
+    let expected_output: Vec<String> = vec!["-s f".into(), "-l force".into()];
+    let options = "-f, --force[=false]";
+    let mut existing_options: HashSet<String> = Default::default();
+    assert_eq!(
+        fish_options(options, &mut existing_options),
+        expected_output
+    );
+    assert_eq!(
+        expected_output.iter().cloned().collect::<HashSet<_>>(),
+        existing_options
+    );
 
-        let expected_output: Vec<String> = vec!["-l 'force'".into()];
-        let options = "-f, --force[=false]";
-        let mut existing_options: HashSet<String> = Default::default();
-        existing_options.insert("-s 'f'".into());
-        existing_options.insert("-l 'something'".into());
-        assert_eq!(
-            fish_options(options, &mut existing_options),
-            expected_output
-        );
-        assert_eq!(
-            expected_output
-                .iter()
-                .cloned()
-                .chain(once("-s 'f'".to_string()))
-                .chain(once("-l 'something'".to_string()))
-                .collect::<HashSet<_>>(),
-            existing_options,
-        );
-    }
+    let expected_output: Vec<String> = vec!["-s \'\\\'\'".into()];
+    let options = "-'";
+    let mut existing_options: HashSet<String> = Default::default();
+    assert_eq!(
+        fish_options(options, &mut existing_options),
+        expected_output
+    );
+    assert_eq!(
+        expected_output.iter().cloned().collect::<HashSet<_>>(),
+        existing_options
+    );
+
+    let expected_output: Vec<String> = vec!["-l force".into()];
+    let options = "-f, --force[=false]";
+    let mut existing_options: HashSet<String> = Default::default();
+    existing_options.insert("-s f".into());
+    existing_options.insert("-l something".into());
+    assert_eq!(
+        fish_options(options, &mut existing_options),
+        expected_output
+    );
+    assert_eq!(
+        expected_output
+            .iter()
+            .cloned()
+            .chain(once("-s f".to_string()))
+            .chain(once("-l something".to_string()))
+            .collect::<HashSet<_>>(),
+        existing_options,
+    );
 }
 
 /// # Panics
@@ -347,50 +362,46 @@ fn truncated_description(description: &str) -> String {
         .split(".")
         .filter(|sentence| !sentence.trim().is_empty());
 
-    let mut out = format!(
-        "{}.",
-        lossy_unicode(&sentences.next().unwrap_or_default().as_bytes())
-    );
+    let out = sentences.next().unwrap_or_default();
+    let mut out = format!("{}.", String::from_utf8_lossy(out.as_bytes()));
     let mut out_len = char_len(&out);
 
     if out_len > MAX_DESCRIPTION_WIDTH {
         out = char_truncate_string(&out, MAX_DESCRIPTION_WIDTH, TRUNCATION_SUFFIX).into_owned();
     } else {
         for line in sentences {
-            let line = lossy_unicode(&line.as_bytes());
             out_len += 1 // space
                 + char_len(&line)
-                + 1 // period
-                ;
+                + 1; // period
             if out_len > MAX_DESCRIPTION_WIDTH {
                 break;
             }
-            out = format!("{} {}.", out, line);
+            out = format!("{} {}.", out, String::from_utf8_lossy(line.as_bytes()));
         }
     }
 
-    fish_escape_single_quote(out)
+    fish_escape_single_quote(&out.trim_end_matches('.'))
 }
 
 #[test]
 fn test_truncated_description() {
-    assert_eq!(truncated_description(r"\'\."), r"'\'.'");
+    assert_eq!(truncated_description(r"\'\."), r"'\''");
 
     assert_eq!(
         truncated_description(r"Don't use this command."),
-        r"'Don\'t use this command.'"
+        r"'Don\'t use this command'"
     );
 
     assert_eq!(
         truncated_description(r"Don't use this command. It's really dumb."),
-        r"'Don\'t use this command.  It\'s really dumb.'"
+        r"'Don\'t use this command.  It\'s really dumb'"
     );
 
     assert_eq!(
         truncated_description(
             r"The description for the command is so long. This second sentence will be dropped, in fact, because it is too long to be displayed comfortably."
         ),
-        r"'The description for the command is so long.'"
+        r"'The description for the command is so long'"
     );
 
     assert_eq!(
@@ -405,44 +416,53 @@ fn test_truncated_description() {
         truncated_description(
             r"     Dumb command.   \It's really dumb\.  Extra spaces aren\'t removed.    "
         ),
-        r"'     Dumb command.    \\It\'s really dumb.   Extra spaces aren\'t removed.'"
+        r"'     Dumb command.    \\It\'s really dumb.   Extra spaces aren\'t removed'"
     );
 }
 
-fn built_command(
-    options: &str,
-    description: &str,
-    built_command_output: &mut Vec<String>,
-    existing_options: &mut HashSet<String>,
-    cmd_name: String,
-) {
-    let fish_options = fish_options(options, existing_options);
-
-    if fish_options.is_empty() {
-        return;
-    }
-
-    built_command_output.push(complete_command(
-        fish_escape_single_quote(cmd_name),
-        fish_options,
-        &truncated_description(description),
-    ));
+struct Completions<'a> {
+    cmdname: &'a str,
+    // TODO should we store the whole built_command here?
+    built_command_output: Vec<String>,
+    existing_options: HashSet<String>,
 }
 
-fn complete_command(cmdname: String, args: Vec<String>, description: &str) -> String {
-    format!(
-        "complete \
-         -c {cmdname} \
-         {args}{description_flag}{description}",
-        cmdname = cmdname,
-        args = args.join(" "),
-        description_flag = if description.is_empty() {
-            ""
-        } else {
-            " --description "
-        },
-        description = description,
-    )
+impl<'a> Completions<'a> {
+    fn new(cmdname: &'a str) -> Completions {
+        Completions {
+            cmdname,
+            built_command_output: Vec::new(),
+            existing_options: HashSet::new(),
+        }
+    }
+
+    fn add(&mut self, option_name: &str, option_desc: &str) {
+        let fish_options = fish_options(option_name, &mut self.existing_options);
+
+        if fish_options.is_empty() {
+            return;
+        }
+
+        self.built_command_output.push(complete_command(
+            &fish_escape_single_quote(self.cmdname),
+            fish_options,
+            &truncated_description(option_desc),
+        ));
+    }
+
+    fn build(self) -> Option<String> {
+        Some(self.built_command_output.join("\n")).filter(|c| !c.is_empty())
+    }
+}
+
+/// Generate fish `complete` command.
+fn complete_command(cmdname: &str, args: Vec<String>, description: &str) -> String {
+    let mut out = format!("complete -c {} {}", cmdname, args.join(" "));
+    if !description.is_empty() {
+        out.push_str(" --description ");
+        out.push_str(description);
+    }
+    out
 }
 
 #[test]
@@ -483,28 +503,41 @@ fn test_complete_command() {
     );
 }
 
-fn remove_groff_formatting(data: &str) -> String {
-    // TODO Can we remove all of these strings in one go?
-    let mut data = data.to_owned();
-    for marker in &[
-        r"\fI", r"\fP", r"\f1", r"\fB", r"\fR", r"\e", r".BI", r".BR", r"0.5i", r".rb", r"\^",
-        r"{ ", r" }", ".B",
-        ".I",
-        //     The next ones are odd. Putting them into a python file makes my
-        //     python linter warn about anomalous backslash and python2 vs python3
-        //     seems to make no difference
-        //     data = data.replace("\ ","")
-        //     data = data.replace("\-","-")
-        //"\ ",
-        //"\&",
-        //"\f",
-    ] {
-        data = data.replace(marker, "");
+fn remove_groff_formatting(data: &str) -> Cow<str> {
+    // // TODO Can we remove all of these strings in one go?
+    // let mut data = data.to_owned();
+    // for marker in &[
+    //     r"\fI", r"\fP", r"\f1", r"\fB", r"\fR", r"\e", r".BI", r".BR", r"0.5i", r".rb", r"\^",
+    //     r"{ ", r" }", ".B",
+    //     ".I",
+    //     //     The next ones are odd. Putting them into a python file makes my
+    //     //     python linter warn about anomalous backslash and python2 vs python3
+    //     //     seems to make no difference
+    //     //     data = data.replace("\ ","")
+    //     //     data = data.replace("\-","-")
+    //     //"\ ",
+    //     //"\&",
+    //     //"\f",
+    // ] {
+    //     data = data.replace(marker, "");
+    // }
+    // // See note above about anomalous backslash
+    // //data = data.replace("\-", "-");
+    // let data = regex!(r##".PD( \d+)"##).replace_all(&data, "");
+    // data.to_string()
+    // using regex is twice as fast as manual replace
+    let re1 = regex!(
+        r"\\fI|\\fP|\\f1|\\fB|\\fR|\\e|\.BI|\.BR|0\.5i|\.rb|\\\^|\{ | \}|\.B|\.I|\f|(.PD( \d+))"
+    );
+    let re2 = regex!(r"\\-");
+    let re3 = regex!(r"\(cq");
+    match re1.replace_all(&data, "") {
+        Cow::Borrowed(s) => match re2.replace_all(&s, "-") {
+            Cow::Borrowed(s) => re3.replace_all(&s, "'"),
+            Cow::Owned(s) => Cow::Owned(re3.replace_all(&s, "'").into_owned()),
+        },
+        Cow::Owned(s) => Cow::Owned(re3.replace_all(&re2.replace_all(&s, "-"), "'").into_owned()),
     }
-    // See note above about anomalous backslash
-    //data = data.replace("\-", "-");
-    let data = regex!(r##".PD( \d+)"##).replace_all(&data, "");
-    data.to_string()
 }
 
 #[test]
@@ -513,17 +546,18 @@ fn test_remove_groff_formatting() {
         remove_groff_formatting(r#"Foo\fIbar\fP Zoom.PD 325 Zoom"#),
         "Foobar Zoom Zoom"
     );
+    assert_eq!(
+        remove_groff_formatting(
+            r#"\n\\fB\\-\\-working\\-directory\\fR=\\fIvalue\\fR\nWorking directory.\n"#
+        ),
+        "\\n\\\\-\\-working\\-directory\\=\\value\\\\nWorking directory.\\n"
+    );
 }
 
 trait ManParser {
-    fn is_my_type(&self, manpage: &str) -> bool {
-        false
-    }
+    fn is_my_type(&self, manpage: &str) -> bool;
 
-    // TODO Is this the right type signature?
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        None
-    }
+    fn parse_man_page(&self, _manpage: &str, _cmdname: &str) -> Option<String>;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -534,131 +568,125 @@ impl ManParser for Type1 {
         manpage.contains(r#".SH "OPTIONS""#)
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let options_section_re = regex!(r#"\.SH "OPTIONS"((?s:.)*?)(\.SH|\z)"#);
+        let options_section_matched = options_section_re.find(manpage);
+        let mut options_section = options_section_matched.unwrap().as_str();
+
+        let options_parts_re = regex!(r"\.PP((?s:.)*?)\.RE");
+        let mut options_matched = options_parts_re.captures(options_section);
+        // add_diagnostic(format!("Command is {}", cmdname));
+
+        if options_matched.is_none() {
+            // add_diagnostic("Unable to find options");
+            return self
+                .fallback(options_section, cmdname)
+                .or_else(|| self.fallback2(options_section, cmdname));
+        }
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let mut data = mat.get(1).unwrap().as_str();
+            let last_dotpp_index = data.rfind(".PP");
+            if let Some(idx) = last_dotpp_index {
+                data = &data[idx + 3..];
+            }
+
+            let data = remove_groff_formatting(data);
+            if let Some((option_name, option_desc)) = data.splitn(2, ".RS 4").next_tuple::<(_, _)>()
+            {
+                let option_name = option_name.trim();
+                if option_name.contains('-') {
+                    let option_name = unquote_double_quotes(option_name);
+                    let option_name = unquote_single_quotes(option_name);
+                    let option_desc = option_desc.trim().replace('\n', " ");
+                    completions.add(option_name, &option_desc);
+                } else {
+                    // add_diagnostic(format!("{:?} doesn't contain '-'", option_name));
+                }
+            } else {
+                // add_diagnostic("Unable to split option from description");
+                return None;
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        completions.build()
     }
 }
 
-// class Type1ManParser(ManParser):
-//     def parse_man_page(self, manpage):
-//         options_section_regex = re.compile( "\.SH \"OPTIONS\"(.*?)(\.SH|\Z)", re.DOTALL)
-//         options_section_matched = re.search( options_section_regex, manpage)
-//
-//         options_section = options_section_matched.group(0)
-//         #   print options_section
-//         options_parts_regex = re.compile("\.PP(.*?)\.RE", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         #   print options_matched
-//         add_diagnostic("Command is %r" % CMDNAME)
-//
-//         if options_matched == None:
-//             add_diagnostic('Unable to find options')
-//             if( self.fallback(options_section) ):
-//                 return True
-//             elif (self.fallback2(options_section) ):
-//                 return True
-//             return False
-//
-//         while (options_matched != None):
-//             data = options_matched.group(1)
-//             last_dotpp_index = data.rfind(".PP")
-//             if (last_dotpp_index != -1):
-//                 data = data[last_dotpp_index+3:]
-//
-//             data = remove_groff_formatting(data)
-//             data = data.split(".RS 4")
-//             if (len (data) > 1): #and len(data[1]) <= 300):
-//                 optionName = data[0].strip()
-//
-//                 if ( optionName.find("-") == -1):
-//                     add_diagnostic("%r doesn't contain '-' " % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-
-//     def fallback(self, options_section):
-//         add_diagnostic('Trying fallback')
-//         options_parts_regex = re.compile("\.TP( \d+)?(.*?)\.TP", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         if options_matched == None:
-//             add_diagnostic('Still not found')
-//             return False
-//         while options_matched != None:
-//             data = options_matched.group(2)
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//             if (len(data)>1 and len(data[1].strip())>0): # and len(data[1])<400):
-//                 optionName = data[0].strip()
-//                 if ( optionName.find("-") == -1):
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-//         return True
-
 impl Type1 {
-    fn fallback(&self, options_section: &str) -> bool {
-        unimplemented!()
+    fn fallback(&self, mut options_section: &str, cmdname: &str) -> Option<String> {
+        // add_diagnostic("Trying fallback");
+        let options_parts_re = regex!(r"\.TP( \d+)?((?s:.)*?)\.TP");
+        let mut options_matched = options_parts_re.captures(options_section);
+        if options_matched.is_none() {
+            // add_diagnostic("Still not found");
+            return None;
+        }
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(2).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            let data = data.splitn(2, '\n').next_tuple::<(_, _)>();
+            if data.filter(|data| !data.1.trim().is_empty()).is_none() {
+                // add_diagnostic("Unable to split option from description");
+                return None;
+            }
+            let option_name = data.unwrap().0.trim();
+            if option_name.contains('-') {
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                let option_desc = data.unwrap().1.trim().replace('\n', " ");
+                completions.add(option_name, &option_desc);
+            } else {
+                // add_diagnostic(format!("{:?} does not contain '-'", option_name));
+            }
+            // XXX possible to add fallback2 here
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        completions.build()
     }
-}
 
-//     def fallback2(self, options_section):
-//         add_diagnostic('Trying last chance fallback')
-//         ix_remover_regex = re.compile("\.IX.*")
-//         trailing_num_regex = re.compile('\\d+$')
-//         options_parts_regex = re.compile("\.IP (.*?)\.IP", re.DOTALL)
-//
-//         options_section = re.sub(ix_remover_regex, "", options_section)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         if options_matched == None:
-//             add_diagnostic('Still (still!) not found')
-//             return False
-//         while options_matched != None:
-//             data = options_matched.group(1)
-//
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//             if (len(data)>1 and len(data[1].strip())>0): # and len(data[1])<400):
-//                 optionName = re.sub(trailing_num_regex, "", data[0].strip())
-//
-//                 if ('-' not in optionName):
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = optionName.strip()
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-//         return True
+    fn fallback2(&self, options_section: &str, cmdname: &str) -> Option<String> {
+        // add_diagnostic("Trying last chance fallback");
+        let ix_remover_re = regex!(r"\.IX.*");
+        let trailing_num_re = regex!(r"\d+$");
+        let options_parts_re = regex!(r"\.IP ((?s:.)*?)\.IP");
 
-impl Type1 {
-    fn fallback2(&self, options_section: &str) -> bool {
-        unimplemented!()
+        let mut options_section = &*ix_remover_re.replace_all(options_section, "");
+        let mut options_matched = options_parts_re.captures(&options_section);
+        if options_matched.is_none() {
+            // add_diagnostic("Still (still!) not found");
+            return None;
+        }
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(1).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            let data: Vec<&str> = data.splitn(2, '\n').collect();
+            if data.len() < 2 || data[1].trim().is_empty() {
+                // add_diagnostic("Unable to split option from description");
+                return None;
+            }
+            let option_name = trailing_num_re.replace_all(data[0].trim(), "");
+            if option_name.contains('-') {
+                let option_name = option_name.trim();
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                let option_desc = data[1].trim().replace('\n', " ");
+                completions.add(option_name, &option_desc);
+            } else {
+                // add_diagnostic(format!("{:?} doesn't contain '-'", option_name));
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(&options_section);
+        }
+        completions.build()
     }
 }
 
@@ -670,48 +698,48 @@ impl ManParser for Type2 {
         manpage.contains(".SH OPTIONS")
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let options_section_re = regex!(r#"\.SH OPTIONS((?s:.)*?)(\.SH|\z)"#);
+        let options_section_matched = options_section_re.captures(manpage);
+        let mut options_section = options_section_matched.unwrap().get(1).unwrap().as_str();
+
+        let options_parts_re = regex!(r#"\.[IT]P( \d+(\.\d)?i?)?((?s:.)*?)\.([IT]P|UNINDENT)"#);
+        let mut options_matched = options_parts_re.captures(options_section);
+        // add_diagnostic(format!("Command is {}", cmdname));
+
+        if options_matched.is_none() {
+            // add_diagnostic("Unable to find options");
+            return None;
+        }
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(3).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            let data = data.trim().splitn(2, '\n').next_tuple::<(_, _)>();
+            if let Some((option_name, option_desc)) =
+                data.filter(|(_, desc)| !desc.trim().is_empty())
+            {
+                let option_name = option_name.trim();
+                if option_name.contains('-') {
+                    let option_name = unquote_double_quotes(option_name);
+                    let option_name = unquote_single_quotes(option_name);
+                    let option_desc = option_desc.trim().replace('\n', " ");
+                    completions.add(option_name, &option_desc);
+                } else {
+                    // add_diagnostic(format!("{:?} doesn't contain '-'", option_name));
+                }
+            } else {
+                // add_diagnostic("Unable to split option from description");
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        completions.build()
+        // TODO not sure why but the original version never succeed here
     }
 }
-
-// class Type2ManParser(ManParser):
-//     def parse_man_page(self, manpage):
-//         options_section_regex = re.compile( "\.SH OPTIONS(.*?)(\.SH|\Z)", re.DOTALL)
-//         options_section_matched = re.search( options_section_regex, manpage)
-//
-//         options_section = options_section_matched.group(1)
-//
-//         options_parts_regex = re.compile("\.[I|T]P( \d+(\.\d)?i?)?(.*?)\.([I|T]P|UNINDENT)", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         add_diagnostic('Command is %r' % CMDNAME)
-//
-//         if options_matched == None:
-//             add_diagnostic("%r: Unable to find options" % self)
-//             return False
-//
-//         while (options_matched != None):
-//             data = options_matched.group(3)
-//
-//             data = remove_groff_formatting(data)
-//
-//             data = data.strip()
-//
-//             data = data.split("\n",1)
-//             if (len(data)>1 and len(data[1].strip())>0): # and len(data[1])<400):
-//                 optionName = data[0].strip()
-//                 if '-' not in optionName:
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Type3;
@@ -721,48 +749,49 @@ impl ManParser for Type3 {
         manpage.contains(".SH DESCRIPTION")
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let options_section_re = regex!(r"\.SH DESCRIPTION((?s:.)*?)(\.SH|\z)");
+        let options_section_matched = options_section_re.find(manpage);
+        let mut options_section = options_section_matched.unwrap().as_str();
+
+        let options_parts_re = regex!(r"\.TP((?s:.)*?)\.TP");
+        let mut options_matched = options_parts_re.captures(options_section);
+        // add_diagnostic(format!("Command is {}", cmdname));
+
+        if options_matched.is_none() {
+            // add_diagnostic("Unable to find options section");
+            return None;
+        }
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(1).unwrap().as_str();
+
+            let data = remove_groff_formatting(data);
+            let data = data.trim();
+            let (option_name, option_desc) = match data.splitn(2, '\n').next_tuple() {
+                Some(tuple) => tuple,
+                None => {
+                    // add_diagnostic("Unable to split option from description");
+                    return None;
+                }
+            };
+            let option_name = option_name.trim();
+            if option_name.contains('-') {
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                let option_desc = option_desc.trim().replace("\n", " ");
+                completions.add(&option_name, &option_desc);
+            } else {
+                // add_diagnostic(format!("{:?} doesn't contain '-'", option_name));
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(&options_section);
+        }
+        completions.build()
     }
 }
-
-// class Type3ManParser(ManParser):
-//     def parse_man_page(self, manpage):
-//         options_section_regex = re.compile( "\.SH DESCRIPTION(.*?)(\.SH|\Z)", re.DOTALL)
-//         options_section_matched = re.search( options_section_regex, manpage)
-//
-//         options_section = options_section_matched.group(1)
-//         options_parts_regex = re.compile("\.TP(.*?)\.TP", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         add_diagnostic("Command is %r" % CMDNAME)
-//
-//         if options_matched == None:
-//             add_diagnostic('Unable to find options section')
-//             return False
-//
-//         while (options_matched != None):
-//             data = options_matched.group(1)
-//
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//
-//             if (len(data)>1): # and len(data[1])<400):
-//                 optionName = data[0].strip()
-//                 if ( optionName.find("-") == -1):
-//                     add_diagnostic("%r doesn't contain '-'" % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Type4;
@@ -772,50 +801,93 @@ impl ManParser for Type4 {
         manpage.contains(".SH FUNCTION LETTERS")
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let options_section_re = regex!(r"\.SH FUNCTION LETTERS((?s:.)*?)(\.SH|\z)");
+        let options_section_matched = options_section_re.captures(manpage);
+        let mut options_section = options_section_matched.unwrap().get(1).unwrap().as_str();
+
+        let options_parts_re = regex!(r"\.TP((?s:.)*?)\.TP");
+        let mut options_matched = options_parts_re.captures(options_section);
+        // add_diagnostic(format!("Command is {}", cmdname));
+
+        if options_matched.is_none() {
+            // add_diagnostic("Unable to find options section");
+            return None;
+        }
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(1).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+            if let Some((option_name, option_desc)) = data.trim().splitn(2, '\n').next_tuple() {
+                let option_name = option_name.trim();
+                if option_name.contains('-') {
+                    let option_name = unquote_double_quotes(option_name);
+                    let option_name = unquote_single_quotes(option_name);
+                    let option_desc = option_desc.trim().replace('\n', " ");
+                    completions.add(option_name, &option_desc);
+                } else {
+                    // add_diagnostic(format!("{} doesn't contain '-'", option_name));
+                }
+            } else {
+                // add_diagnostic("Unable to split option from description");
+                return None;
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end() - 3..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        completions.build()
     }
 }
 
-// class Type4ManParser(ManParser):
-//     def parse_man_page(self, manpage):
-//         options_section_regex = re.compile( "\.SH FUNCTION LETTERS(.*?)(\.SH|\Z)", re.DOTALL)
-//         options_section_matched = re.search( options_section_regex, manpage)
-//
-//         options_section = options_section_matched.group(1)
-//         options_parts_regex = re.compile("\.TP(.*?)\.TP", re.DOTALL)
-//         options_matched = re.search(options_parts_regex, options_section)
-//         add_diagnostic("Command is %r" % CMDNAME)
-//
-//         if options_matched == None:
-//             print >> sys.stderr, "Unable to find options section"
-//             return False
-//
-//         while (options_matched != None):
-//             data = options_matched.group(1)
-//
-//             data = remove_groff_formatting(data)
-//             data = data.strip()
-//             data = data.split("\n",1)
-//
-//             if (len(data)>1): # and len(data[1])<400):
-//                 optionName = data[0].strip()
-//                 if ( optionName.find("-") == -1):
-//                     add_diagnostic("%r doesn't contain '-' " % optionName)
-//                 else:
-//                     optionName = unquote_double_quotes(optionName)
-//                     optionName = unquote_single_quotes(optionName)
-//                     optionDescription = data[1].strip().replace("\n"," ")
-//                     built_command(optionName, optionDescription)
-//
-//             else:
-//                 add_diagnostic('Unable to split option from description')
-//                 return False
-//
-//             options_section = options_section[options_matched.end()-3:]
-//             options_matched = re.search(options_parts_regex, options_section)
-//
-//         return True
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct TypeScdoc;
+
+impl ManParser for TypeScdoc {
+    fn is_my_type(&self, manpage: &str) -> bool {
+        regex!(r#"\.\\" Generated by scdoc(?s:.)?*\.SH OPTIONS"#).is_match(manpage)
+    }
+
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let options_section_re = regex!(r"\.SH OPTIONS((?s:.)*?)\.SH");
+        let options_section_matched = options_section_re.captures(manpage);
+        let mut options_section = options_section_matched.unwrap().get(1)?.as_str();
+
+        let options_parts_re = regex!(r"((?s:.)*?)\.RE");
+        let mut options_matched = options_parts_re.captures(options_section);
+        // add_diagnostic(format!("Command is {}", cmdname));
+
+        if options_matched.is_none() {
+            // add_diagnostic("Unable to find options section");
+            return None;
+        }
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(mat) = options_matched {
+            let data = mat.get(1).unwrap().as_str();
+            let data = remove_groff_formatting(data);
+
+            // Should be at least two lines, split name and desc, other lines ignored
+            let lines = data.split('\n');
+            let mut iter = lines.filter(|s| !["", ".P", ".RS 4"].contains(s));
+            if let Some((option_name, option_desc)) = iter.next_tuple() {
+                let option_name = unquote_double_quotes(option_name);
+                let option_name = unquote_single_quotes(option_name);
+                if !option_name.contains('-') {
+                    // add_diagnostic(format!("{} doesn't contain '-'", option_name));
+                }
+                completions.add(option_name, option_desc);
+            } else {
+                // add_diagnostic(format!("Unable to split option from description"));
+            }
+
+            options_section = &options_section[mat.get(0).unwrap().end()..];
+            options_matched = options_parts_re.captures(options_section);
+        }
+        completions.build()
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct TypeDarwin;
@@ -825,16 +897,61 @@ impl ManParser for TypeDarwin {
         regex!(r##"\.S[hH] DESCRIPTION"##).is_match(manpage)
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let mut lines = manpage.split_terminator("\n").skip_while(|cond| {
+            !cond.starts_with(".Sh DESCRIPTION") || !cond.starts_with(".SH DESCRIPTION")
+        });
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(line) = lines.next() {
+            if !Self::is_option(line) {
+                continue;
+            }
+
+            // Try to guess how many dashes this argument has
+            let dash_count = Self::count_argument_dashes(line);
+
+            let line = Self::groff_replace_escapes(line);
+            let line = Self::trim_groff(&line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Extract the name
+            let name = line.split_whitespace().next().unwrap();
+
+            // Extract the description
+            let desc = lines
+                .by_ref()
+                .take_while(|line| Self::is_option(line))
+                .filter(|line| line.starts_with(".") && !line.starts_with(".\"")) // Ignore comments
+                .map(Self::groff_replace_escapes)
+                .map(|line| Self::trim_groff(&line))
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if name == "-" {
+                // Skip double -- arguments
+                continue;
+            }
+            let name = if name.len() == 1 {
+                format!("{}{}", "-".repeat(dash_count as usize), name)
+            } else {
+                format!("-{}", name)
+            };
+            completions.add(&name, &desc);
+        }
+        completions.build()
     }
 }
 
 #[test]
 fn test_TypeDarwin_trim_groff() {
-    assert_eq!(TypeDarwin::trim_groff(". Test"), " Test");
+    assert_eq!(TypeDarwin::trim_groff(". Test"), "Test");
     assert_eq!(TypeDarwin::trim_groff("..."), "..");
-    assert_eq!(TypeDarwin::trim_groff(" Test"), " Test");
+    assert_eq!(TypeDarwin::trim_groff(" Test"), "Test");
     assert_eq!(TypeDarwin::trim_groff("Test ."), "Test.");
     assert_eq!(TypeDarwin::trim_groff("Test ,"), "Test,");
     assert_eq!(TypeDarwin::trim_groff("Ab "), "");
@@ -855,7 +972,7 @@ impl TypeDarwin {
         // Skip leading groff crud
         let line = regex!(r"^\.?([A-Z][a-z]\s)*").replace(&line, "");
         // If the line ends with a space and then a period or comma, then erase the space
-        regex!(r" ([.,])$").replace(&line, "$1").to_string()
+        regex!(r" ([.,])$").replace(&line, "$1").trim().to_string()
     }
 }
 
@@ -905,8 +1022,7 @@ fn test_TypeDarwin_count_argument_dashes() {
 
 impl TypeDarwin {
     fn count_argument_dashes(line: &str) -> u32 {
-        let (string, result) = replace_all(&line);
-        result
+        replace_all(&line).1
     }
 }
 
@@ -944,75 +1060,50 @@ impl TypeDarwin {
     }
 }
 
-//     def parse_man_page(self, manpage):
-//         got_something = False
-//         lines =  manpage.splitlines()
-//         # Discard lines until we get to ".sh Description"
-//         while lines and not (lines[0].startswith('.Sh DESCRIPTION') or lines[0].startswith('.SH DESCRIPTION')):
-//             lines.pop(0)
-//
-//         while lines:
-//             # Pop until we get to the next option
-//             while lines and not self.is_option(lines[0]):
-//                 lines.pop(0)
-//
-//             if not lines:
-//                 continue
-//
-//             # Get the line and clean it up
-//             line = lines.pop(0)
-//
-//             # Try to guess how many dashes this argument has
-//             dash_count = self.count_argument_dashes(line)
-//
-//             line = self.groff_replace_escapes(line)
-//             line = self.trim_groff(line)
-//             line = line.strip()
-//             if not line: continue
-//
-//             # Extract the name
-//             name = line.split(None, 2)[0]
-//
-//             # Extract the description
-//             desc_lines = []
-//             while lines and not self.is_option(lines[0]):
-//                 line = lossy_unicode(lines.pop(0).strip())
-//                 # Ignore comments
-//                 if line.startswith(r'.\"'):
-//                     continue
-//                 if line.startswith('.'):
-//                     line = self.groff_replace_escapes(line)
-//                     line = self.trim_groff(line).strip()
-//                 if line:
-//                     desc_lines.append(line)
-//             desc = ' '.join(desc_lines)
-//
-//             if name == '-':
-//                 # Skip double -- arguments
-//                 continue
-//             elif len(name) > 1:
-//                 # Output the command
-//                 built_command(('-' * dash_count) + name, desc)
-//                 got_something = True
-//             elif len(name) == 1:
-//                 built_command('-' + name, desc)
-//                 got_something = True
-//
-//         return got_something
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct TypeDeroff;
 
 impl ManParser for TypeDeroff {
-    fn is_my_type(&self, manpage: &str) -> bool {
+    fn is_my_type(&self, _manpage: &str) -> bool {
         // TODO Revisit post-MVP
         // I think this is just to account for TypeDeroff being the last ManParser implementation
         // that is checked; it's the fallback.
-        true
+        true // We're optimists
     }
 
-    fn parse_man_page(&mut self, manpage: &str) -> Option<String> {
-        unimplemented!();
+    fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+        let mut deroffer = deroff::Deroffer::new();
+        deroffer.deroff(manpage.to_owned());
+        let output = deroffer.get_output();
+        let lines = output.lines();
+
+        let mut lines = lines
+            // Discard lines until we get to DESCRIPTION or OPTIONS
+            .skip_while(|line| {
+                !(line.starts_with("DESCRIPTION")
+                    || line.starts_with("OPTIONS")
+                    || line.starts_with("COMMAND OPTIONS"))
+            })
+            // Look for BUGS and stop there
+            .take_while(|line| !line.starts_with("BUGS"))
+            .peekable();
+
+        let mut completions = Completions::new(cmdname);
+        while let Some(options) = lines.next() {
+            // Skip until we get to the next option
+            if !TypeDeroff::is_option(options) {
+                continue;
+            }
+
+            // Pop until we get to either an empty line or a line starting with -
+            let description: Vec<_> = lines
+                .peeking_take_while(|line| TypeDeroff::could_be_description(line))
+                .collect();
+            let description = description.join(" ");
+
+            completions.add(&options, &description);
+        }
+        completions.build()
     }
 }
 
@@ -1042,60 +1133,21 @@ impl TypeDeroff {
     }
 }
 
-// class TypeDeroffManParser(ManParser):
-//     def parse_man_page(self, manpage):
-//         d = Deroffer()
-//         d.deroff(manpage)
-//         output = d.get_output()
-//         lines = output.split('\n')
-//
-//         got_something = False
-//
-//         # Discard lines until we get to DESCRIPTION or OPTIONS
-//         while lines and not (lines[0].startswith('DESCRIPTION') or lines[0].startswith('OPTIONS') or lines[0].startswith('COMMAND OPTIONS')):
-//             lines.pop(0)
-//
-//         # Look for BUGS and stop there
-//         for idx in range(len(lines)):
-//             line = lines[idx]
-//             if line.startswith('BUGS'):
-//                 # Drop remaining elements
-//                 lines[idx:] = []
-//                 break
-//
-//         while lines:
-//             # Pop until we get to the next option
-//             while lines and not self.is_option(lines[0]):
-//                 line = lines.pop(0)
-//
-//             if not lines:
-//                 continue
-//
-//             options = lines.pop(0)
-//
-//             # Pop until we get to either an empty line or a line starting with -
-//             description = ''
-//             while lines and self.could_be_description(lines[0]):
-//                 if description: description += ' '
-//                 description += lines.pop(0)
-//
-//             built_command(options, description)
-//             got_something = True
-//
-//         return got_something
-
 #[test]
 fn test_file_is_overwritable() {
     use std::path::Path;
     use tests::FileKind;
 
     // Setup file paths
+
     // Good File Paths
-    let good_string = String::from("/tmp/test_file_is_overwritable__good.txt");
+    let mut good_string = env::temp_dir();
+    good_string.push("test_file_is_overwritable__good.txt");
     let good_path = Path::new(&good_string);
 
     // Bad File paths
-    let bad_string = String::from("/tmp/test_file_is_overwritable__bad.txt");
+    let mut bad_string = env::temp_dir();
+    bad_string.push("test_file_is_overwritable__bad.txt");
     let bad_path = Path::new(&bad_string);
 
     // Remove any leftover files if the already
@@ -1127,7 +1179,7 @@ fn test_file_is_overwritable() {
 // Return whether the file at the given path is overwritable
 // Raises IOError if it cannot be opened
 fn file_is_overwritable(path: &Path) -> Result<bool, String> {
-    use std::error::Error;
+    use bstr::ByteSlice;
     let display = path.display();
     let f = File::open(path).map_err(|error| format!("{:?}", error))?;
     let file = BufReader::new(&f);
@@ -1141,20 +1193,71 @@ fn file_is_overwritable(path: &Path) -> Result<bool, String> {
                 .to_owned()
         })
         .filter(|line| !line.is_empty())
-        .take_while(|line| line.starts_with("#"))
-        .any(|line| line.contains("Autogenerated")))
+        .take_while(|line| line.starts_with(b"#"))
+        .any(|line: Vec<u8>| line.contains_str("Autogenerated")))
 }
 
-// # Remove any and all autogenerated completions in the given directory
-// def cleanup_autogenerated_completions_in_directory(dir):
-//     try:
-//         for filename in os.listdir(dir):
-//             # Skip non .fish files
-//             if not filename.endswith('.fish'): continue
-//             path = os.path.join(dir, filename)
-//             cleanup_autogenerated_file(path)
-//     except OSError as err:
-//         return False
+/// Remove any and all autogenerated completions in the given directory
+fn cleanup_autogenerated_completions_in_directory(dir: &Path) -> io::Result<()> {
+    Ok(for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().map_or(false, |ext| ext == "fish") {
+            cleanup_autogenerated_file(&path);
+        }
+    })
+}
+
+#[test]
+fn test_cleanup_autogenerated_file_in_directory() {
+    use tests::FileKind;
+
+    // Setup test dir
+    let test_dir = env::temp_dir().join("fish-manpage-completions-test");
+    fs::create_dir(&test_dir).unwrap();
+    let good_path = test_dir.join("good.fish");
+    let bad1_path = test_dir.join("bad.fish");
+    let bad2_path = test_dir.join("bad.txt");
+
+    // Remove leftovers from previous failed tests
+    tests::remove_test_file(&good_path).ok();
+    tests::remove_test_file(&bad1_path).ok();
+    tests::remove_test_file(&bad2_path).ok();
+
+    // Create files
+    tests::create_test_file(&good_path, FileKind::Good).ok();
+    tests::create_test_file(&bad1_path, FileKind::Bad).ok();
+    tests::create_test_file(&bad2_path, FileKind::Bad).ok();
+
+    // Tests
+    assert!(cleanup_autogenerated_completions_in_directory(&test_dir).is_ok());
+    assert!(!good_path.exists());
+    assert!(bad1_path.exists());
+    assert!(bad2_path.exists());
+
+    // Tear down
+    tests::remove_test_file(&good_path).ok();
+    tests::remove_test_file(&bad1_path).ok();
+    tests::remove_test_file(&bad2_path).ok();
+    fs::remove_dir(&test_dir).unwrap();
+
+    // Fail if dir not exist
+    assert!(cleanup_autogenerated_completions_in_directory(&test_dir).is_err());
+}
+
+/// Delete the file if it is autogenerated
+fn cleanup_autogenerated_file(path: &Path) {
+    if file_is_overwritable(path) == Ok(true) {
+        // Original proceeds while ignoring errors
+        if let Err(err) = std::fs::remove_file(path) {
+            eprintln!(
+                "Error in cleaning up auto-generated file ({}): {}",
+                path.to_string_lossy(),
+                err.to_string(),
+            );
+        }
+    }
+}
+
 #[test]
 fn test_cleanup_autogenerated_file() {
     use std::path::Path;
@@ -1162,11 +1265,13 @@ fn test_cleanup_autogenerated_file() {
 
     // Setup file paths
     // Good File Paths
-    let good_string = String::from("/tmp/test_cleanup_autogenerated_file__good.txt");
+    let mut good_string = env::temp_dir();
+    good_string.push("test_cleanup_autogenerated_file__good.txt");
     let good_path = Path::new(&good_string);
 
     // Bad File paths
-    let bad_string = String::from("/tmp/test_cleanup_autogenerated_file__bad.txt");
+    let mut bad_string = env::temp_dir();
+    bad_string.push("test_cleanup_autogenerated_file__bad.txt");
     let bad_path = Path::new(&bad_string);
 
     // Remove any leftover files if the already
@@ -1195,203 +1300,192 @@ fn test_cleanup_autogenerated_file() {
     tests::remove_test_file(bad_path);
 }
 
-fn cleanup_autogenerated_file(path: &Path) {
-    use std::error::Error;
+fn parse_manpage_at_path(
+    manpage_path: &Path,
+    output_directory: Option<&Path>,
+    deroff_only: bool,
+) -> io::Result<bool> {
+    // Clear diagnostic
+    // diagnostic_output[:] = []
+    // diagnostic_indent = 0
 
-    if file_is_overwritable(path) == Ok(true) {
-        // Original proceeds while ignoring errors
-        if let Err(err) = std::fs::remove_file(path) {
-            eprintln!(
-                "Error in cleaning up auto-generated file ({}): {}",
-                path.to_string_lossy(),
-                err.description(),
-            );
+    // Set up some diagnostic
+    // add_diagnostic(format!("Considering {}", manpage_path));
+    // diagnostic_indent += 1
+
+    // Get the "base" command, e.g. gcc.1.gz -> gcc
+    // These casts are safe as OsStr is internally a wrapper around [u8] on all
+    // platforms. Taken from libstd.
+    let cmdname = manpage_path
+        .file_name()
+        .and_then(|file| file.as_bytes().splitn(2, |b| *b == b'.').next());
+    let cmdname = String::from_utf8_lossy(cmdname.unwrap());
+    let ignored_commands = [
+        "cc", "g++", "gcc", "c++", "cpp", "emacs", "gprof", "wget", "ld", "awk",
+    ];
+    if ignored_commands.contains(&cmdname.as_ref()) {
+        return Ok(false);
+    }
+
+    let mut manpage = String::new();
+    let extension = manpage_path.extension().unwrap_or_default();
+    let extension = extension.to_string_lossy();
+    if extension.as_ref() == "gz" {
+        let mut gz = GzDecoder::new(File::open(manpage_path)?);
+        gz.read_to_string(&mut manpage)?;
+    } else if extension.as_ref() == "bz2" {
+        let mut bz = BzDecoder::new(File::open(manpage_path)?);
+        bz.read_to_string(&mut manpage)?;
+    } else if extension.as_ref() == "xz" || extension.as_ref() == "lzma" {
+        let mut xz = XzDecoder::new(File::open(manpage_path)?);
+        xz.read_to_string(&mut manpage)?;
+    } else if (1..=9).any(|suffix| suffix.to_string() == extension.as_ref()) {
+        File::open(manpage_path)?.read_to_string(&mut manpage)?;
+    }
+
+    // Ignore perl's gazillion man pages
+    let ignored_prefixes = ["perl", "zsh"];
+    if ignored_prefixes
+        .iter()
+        .any(|prefix| cmdname.starts_with(prefix))
+    {
+        return Ok(false);
+    }
+
+    // Ignore the millions of links to BUILTIN(1)
+    if manpage.contains("BUILTIN 1") || manpage.contains("builtin.1") {
+        return Ok(false);
+    }
+
+    let parsers = if deroff_only {
+        &[ManType::TypeDeroff(TypeDeroff)]
+    } else {
+        ManType::ALL
+    };
+    let parsers = parsers.iter().filter(|parser| parser.is_my_type(&manpage));
+    let mut parsers = parsers.peekable();
+
+    if parsers.peek().is_none() {
+        // add_diagnostic(format!("{}: Not supported", manpage_path));
+    }
+
+    if let Some(mut completions) = parsers
+        // .inspect(|parser| add_diagnostic(format!("Trying {}", parser)))
+        .find_map(|parser| parser.parse_man_page(&manpage, &cmdname))
+    {
+        let comments = format!(
+            "# {}\n# Autogenerated from man page {}\n",
+            &cmdname,
+            manpage_path.display()
+        );
+        completions.insert_str(0, &comments);
+
+        if let Some(output_directory) = output_directory {
+            let fullpath = output_directory
+                .join(cmdname.as_ref())
+                .with_extension("fish");
+            match File::create(fullpath) {
+                Ok(mut file) => file.write_all(completions.as_bytes())?,
+                Err(err) => {
+                    // add_diagnostic(format!("Unable to open file '{}': error({}): {}",
+                    // fullpath, errno, strerror));
+                    return Err(err);
+                }
+            }
+        } else {
+            io::stdout().lock().write_all(completions.as_bytes())?;
         }
+        // add_diagnostic(format!("{} parsed successfully", manpage_path))
+        Ok(true)
+    } else {
+        let _parser_names = parsers.join(", ");
+        // add_diagnostic(format!(
+        //     "{} contains no options or is unparsable (tried parser {})",
+        //     manpage_path, parser_names), BRIEF_VERBOSE);
+        Ok(false)
     }
 }
 
-// def parse_manpage_at_path(manpage_path, output_directory):
-//     filename = os.path.basename(manpage_path)
-//
-//     # Clear diagnostics
-//     global diagnostic_indent
-//     diagnostic_output[:] = []
-//     diagnostic_indent = 0
-//
-//     # Set up some diagnostics
-//     add_diagnostic('Considering ' + manpage_path)
-//     diagnostic_indent += 1
-//
-//     if manpage_path.endswith('.gz'):
-//         fd = gzip.open(manpage_path, 'r')
-//         manpage = fd.read()
-//         if IS_PY3: manpage = manpage.decode('latin-1')
-//     elif manpage_path.endswith('.bz2'):
-//         fd = bz2.BZ2File(manpage_path, 'r')
-//         manpage = fd.read()
-//         if IS_PY3: manpage = manpage.decode('latin-1')
-//     elif manpage_path.endswith('.xz') or manpage_path.endswith('.lzma'):
-//         if not lzma_available:
-//             return
-//         fd = lzma.LZMAFile(str(manpage_path), 'r')
-//         manpage = fd.read()
-//         if IS_PY3: manpage = manpage.decode('latin-1')
-//     elif manpage_path.endswith((".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9")):
-//         if IS_PY3:
-//             fd = open(manpage_path, 'r', encoding='latin-1')
-//         else:
-//             fd = open(manpage_path, 'r')
-//         manpage = fd.read()
-//     else:
-//         return
-//     fd.close()
-//
-//     manpage = str(manpage)
-//
-//     # Get the "base" command, e.g. gcc.1.gz -> gcc
-//     cmd_base = CMDNAME.split('.', 1)[0]
-//     ignoredcommands = ["cc", "g++", "gcc", "c++", "cpp", "emacs", "gprof", "wget", "ld", "awk"]
-//     if cmd_base in ignoredcommands:
-//         return
-//
-//     # Ignore perl's gazillion man pages
-//     ignored_prefixes = ['perl', 'zsh']
-//     for prefix in ignored_prefixes:
-//         if cmd_base.startswith(prefix):
-//             return
-//
-//     # Ignore the millions of links to BUILTIN(1)
-//     if 'BUILTIN 1' in manpage or 'builtin.1' in manpage:
-//         return
-//
-//     # Clear the output list
-//     built_command_output[:] = []
-//
-//     if DEROFF_ONLY:
-//         parsers = [TypeDeroffManParser()]
-//     else:
-//         parsers = [Type1ManParser(), Type2ManParser(), Type4ManParser(), Type3ManParser(), TypeDarwinManParser(), TypeDeroffManParser()]
-//     parsersToTry = [p for p in parsers if p.is_my_type(manpage)]
-//
-//     success = False
-//     if not parsersToTry:
-//         add_diagnostic(manpage_path + ": Not supported")
-//     else:
-//         for parser in parsersToTry:
-//             add_diagnostic('Trying %s' % parser.__class__.__name__)
-//             diagnostic_indent += 1
-//             success = parser.parse_man_page(manpage)
-//             diagnostic_indent -= 1
-//             # Make sure empty files aren't reported as success
-//             if not built_command_output:
-//                 success = False
-//             if success:
-//                 PARSER_INFO.setdefault(parser.__class__.__name__, []).append(CMDNAME)
-//                 break
-//
-//         if success:
-//             if WRITE_TO_STDOUT:
-//                 output_file = sys.stdout
-//             else:
-//                 fullpath = os.path.join(output_directory, CMDNAME + '.fish')
-//                 try:
-//                     output_file = codecs.open(fullpath, "w", encoding="utf-8")
-//                 except IOError as err:
-//                     add_diagnostic("Unable to open file '%s': error(%d): %s" % (fullpath, err.errno, err.strerror))
-//                     return False
-//
-//             built_command_output.insert(0, "# " + CMDNAME)
-//
-//             # Output the magic word Autogenerated so we can tell if we can overwrite this
-//             built_command_output.insert(1, "# Autogenerated from man page " + manpage_path)
-//             # built_command_output.insert(2, "# using " + parser.__class__.__name__) # XXX MISATTRIBUTES THE CULPABILE PARSER! Was really using Type2 but reporting TypeDeroffManParser
-//
-//             for line in built_command_output:
-//                 output_file.write(line)
-//                 output_file.write('\n')
-//             output_file.write('\n')
-//             add_diagnostic(manpage_path + ' parsed successfully')
-//             if output_file != sys.stdout:
-//                 output_file.close()
-//         else:
-//             parser_names =  ', '.join(p.__class__.__name__ for p in parsersToTry)
-//             #add_diagnostic('%s contains no options or is unparsable' % manpage_path, BRIEF_VERBOSE)
-//             add_diagnostic('%s contains no options or is unparsable (tried parser %s)' % (manpage_path, parser_names), BRIEF_VERBOSE)
-//
-//     return success
+/// Get the number of digits in num
+fn num_digits(n: usize) -> usize {
+    (1.max(n) as f32).log10() as usize + 1
+}
 
-// def parse_and_output_man_pages(paths, output_directory, show_progress):
-//     global diagnostic_indent, CMDNAME
-//     paths.sort()
-//     total_count = len(paths)
-//     successful_count, index = 0, 0
-//     padding_len = len(str(total_count))
-//     last_progress_string_length = 0
-//     if show_progress and not WRITE_TO_STDOUT:
-//         print("Parsing man pages and writing completions to {0}".format(output_directory))
-//
-//     man_page_suffixes = set([os.path.splitext(m)[1][1:] for m in paths])
-//     lzma_xz_occurs = "xz" in man_page_suffixes or "lzma" in man_page_suffixes
-//     if lzma_xz_occurs and not lzma_available:
-//         add_diagnostic('At least one man page is compressed with lzma or xz, but the "lzma" module is not available.'
-//                        ' Any man page compressed with either will be skipped.',
-//                        NOT_VERBOSE)
-//         flush_diagnostics(sys.stderr)
-//
-//     for manpage_path in paths:
-//         index += 1
-//
-//         # Get the "base" command, e.g. gcc.1.gz -> gcc
-//         man_file_name = os.path.basename(manpage_path)
-//         CMDNAME = man_file_name.split('.', 1)[0]
-//         output_file_name = CMDNAME + '.fish'
-//
-//         # Show progress if we're doing that
-//         if show_progress:
-//             progress_str = '  {0} / {1} : {2}'.format((str(index).rjust(padding_len)), total_count, man_file_name)
-//             # Pad on the right with spaces so we overwrite whatever we wrote last time
-//             padded_progress_str = progress_str.ljust(last_progress_string_length)
-//             last_progress_string_length = len(progress_str)
-//             sys.stdout.write("\r{0}\r".format(padded_progress_str))
-//             sys.stdout.flush()
-//
-//         # Maybe we want to skip this item
-//         skip = False
-//         if not WRITE_TO_STDOUT:
-//             # Compute the path that we would write to
-//             output_path = os.path.join(output_directory, output_file_name)
-//
-//         # Now skip if requested
-//         if skip:
-//             continue
-//
-//         try:
-//             if parse_manpage_at_path(manpage_path, output_directory):
-//                 successful_count += 1
-//         except IOError:
-//             diagnostic_indent = 0
-//             add_diagnostic('Cannot open ' + manpage_path)
-//         except (KeyboardInterrupt, SystemExit):
-//             raise
-//         except:
-//             add_diagnostic('Error parsing %s: %s' % (manpage_path, sys.exc_info()[0]), BRIEF_VERBOSE)
-//             flush_diagnostics(sys.stderr)
-//             traceback.print_exc(file=sys.stderr)
-//         flush_diagnostics(sys.stderr)
-//     print("") #Newline after loop
-//     add_diagnostic("Successfully parsed %d / %d pages" % (successful_count, total_count), BRIEF_VERBOSE)
-//     flush_diagnostics(sys.stderr)
+#[test]
+fn test_num_digits() {
+    assert_eq!(num_digits(1000), 4);
+    assert_eq!(num_digits(100), 3);
+    assert_eq!(num_digits(33), 2);
+    assert_eq!(num_digits(123456789012345), 15);
+    assert_eq!(num_digits(0), 1);
+}
 
-#[derive(Copy, Clone, Debug)]
-struct Progress(pub bool);
-
-// TODO Arg/output types?
 fn parse_and_output_man_pages(
-    _paths: impl Iterator<Item = PathBuf>,
-    _output_directory: PathBuf,
-    Progress(_show_progress): Progress,
+    paths: &mut [PathBuf],
+    output_directory: Option<PathBuf>,
+    show_progress: bool,
+    deroff_only: bool,
 ) {
-    unimplemented!();
+    paths.sort();
+
+    let total = paths.len();
+
+    let mut successful_count = 0;
+    let max_digits = num_digits(total);
+
+    if let Some(output_directory) = output_directory.as_ref() {
+        if show_progress {
+            println!(
+                "Parsing man pages and writing completions to {}",
+                output_directory.display()
+            );
+        }
+    }
+
+    for (index, manpage_path) in paths.iter().enumerate() {
+        // foo/bar/gcc.1.gz -> gcc.1.gz
+        let man_file_name = manpage_path
+            .file_name()
+            .map(|fname| fname.to_string_lossy())
+            .unwrap_or_else(|| {
+                panic!(
+                    "Failed to get manfile name from {:?}",
+                    manpage_path.display()
+                )
+            });
+
+        if show_progress && output_directory.is_some() {
+            let progress = format!(
+                "{0:>1$} / {2} : {3}",
+                index + 1,
+                max_digits,
+                total,
+                man_file_name,
+            );
+
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            lock.write_all(format!("\r\x1b[K{}", progress).as_bytes())
+                .expect("Failed to write to stdout");
+            lock.flush().expect("Failed to flush stdout");
+        }
+
+        match parse_manpage_at_path(&manpage_path, output_directory.as_deref(), deroff_only) {
+            Ok(true) => successful_count += 1,
+            Ok(false) => {}
+            Err(_) => {
+                // add_diagnostic(format!("Cannot open {}", manpage_path), VERY_VERBOSE)
+            }
+        };
+
+        // flush diagnostics
+    }
+
+    // "Newline after loop"
+    println!();
+
+    // add_diagnostic(format!("successfully parsed {} / {} pages", successful_count, total_count), BRIEF_VERBOSE);
+    // flush diagnostics
 }
 
 macro_rules! mantypes {
@@ -1413,98 +1507,43 @@ macro_rules! mantypes {
         }
         )*
 
+        impl fmt::Display for ManType {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", match self {
+                    $(ManType::$typ($typ) => stringify!($typ),)*
+                })
+            }
+        }
+
         impl ManParser for ManType {
             fn is_my_type(&self, manpage: &str) -> bool {
                 match self {$(
                     ManType::$typ(t) => t.is_my_type(manpage),
                 )*}
             }
+
+            fn parse_man_page(&self, manpage: &str, cmdname: &str) -> Option<String> {
+                match self {$(
+                    ManType::$typ(t) => t.parse_man_page(manpage, cmdname),
+                )*}
+            }
         }
     };
 }
 
-mantypes![Type1, Type2, Type3, Type4, TypeDarwin, TypeDeroff];
-
-fn parsers_to_try(input: &str) -> Vec<ManType> {
-    ManType::ALL
-        .iter()
-        .filter(|parser| parser.is_my_type(input))
-        .cloned()
-        .collect()
-}
-
-#[test]
-fn test_parsers_to_try() {
-    assert_eq!(
-        parsers_to_try(r###".SH "OPTIONS""###),
-        [Type1.into(), TypeDeroff.into()],
-    );
-
-    assert_eq!(
-        parsers_to_try(r###".SH OPTIONS"###),
-        [Type2.into(), TypeDeroff.into()],
-    );
-
-    assert_eq!(
-        parsers_to_try(".SH OPTIONS\nabc.SH DESCRIPTION"),
-        [
-            Type2.into(),
-            Type3.into(),
-            TypeDarwin.into(),
-            TypeDeroff.into(),
-        ],
-    );
-
-    assert_eq!(
-        parsers_to_try(".SH OPTIONS\nabc.Sh DESCRIPTION"),
-        [Type2.into(), TypeDarwin.into(), TypeDeroff.into()],
-    );
-
-    assert_eq!(
-        parsers_to_try(".SH FUNCTION LETTERS"),
-        [Type4.into(), TypeDeroff.into()],
-    );
-}
-
-impl App {
-    // TODO Result type
-    // This function might be useable as a helper function for parse_manpage_at_path
-    fn single_man_page<R: Read, W: Write>(
-        &mut self,
-        input: &mut R,
-        output: &mut W,
-        input_name: &str,
-    ) {
-        let mut buf = vec![];
-        input.read_to_end(&mut buf).unwrap();
-        dbg!(buf.len());
-        // TODO Either use lossy conversion or do something sensible with the Err
-        let buf = String::from_utf8(buf).unwrap();
-        // TODO mimic multiple parser logic
-        let mut parsers = parsers_to_try(&buf);
-        if parsers.is_empty() {
-            self.add_diagnostic(&format!("{}: Not supported", input_name), None);
-        }
-        for parser in parsers.iter_mut() {
-            if let Some(completions) = parser.parse_man_page(&buf) {
-                output.write_all(completions.as_bytes()).unwrap();
-                return;
-            }
-        }
-    }
-}
+mantypes![Type1, Type2, Type3, Type4, TypeScdoc, TypeDarwin, TypeDeroff];
 
 /// Return all the paths to man(1) and man(8) files in the manpath.
 fn get_paths_from_man_locations() -> Vec<PathBuf> {
     // $MANPATH take precedence, just like with `man` on the CLI.
-    let mut parent_paths: Vec<_> = if let Some(paths) = env::var_os("MANPATH") {
-        env::split_paths(&paths).collect()
-    } else if let Ok(output) = Command::new("manpath").output() {
+    let mut parent_paths: Vec<_> = if let Ok(output) = Command::new("manpath").output() {
         let output = String::from_utf8(output.stdout).unwrap();
-        env::split_paths(&output).collect()
+        env::split_paths(&output.trim()).collect()
     } else if let Ok(output) = Command::new("man").arg("--path").output() {
         let output = String::from_utf8(output.stdout).unwrap();
-        env::split_paths(&output).collect()
+        env::split_paths(&output.trim()).collect()
+    } else if let Some(paths) = env::var_os("MANPATH") {
+        env::split_paths(&paths).collect()
     // HACK: Use some fallbacks in case we can't get anything else.
     // `mandoc` does not provide `manpath` or `man --path` and $MANPATH might not be set.
     // The alternative is reading its config file (/etc/man.conf)
@@ -1538,106 +1577,40 @@ fn get_paths_from_man_locations() -> Vec<PathBuf> {
 
 mod deroff;
 
+/// Generate fish completions from manpages.
 #[derive(StructOpt, Debug)]
 struct Opts {
-    files: Vec<PathBuf>,
-    #[structopt(short, long, default_value = "0")]
+    /// Level of debug output.
+    #[structopt(short, long, default_value = "0", possible_values = &["0", "1", "2"])]
     verbose: u8,
-    /// Print to stdout rather than to a directory of completions
-    #[structopt(short, long)]
+    /// Write the completions to stdout.
+    #[structopt(short, long, conflicts_with = "directory")]
     stdout: bool,
+    /// Use deroff parser only.
+    #[structopt(short = "z", long)]
+    deroff_only: bool,
+    /// Directory to save the completions in.
     #[structopt(short, long)]
     directory: Option<PathBuf>,
+    /// Use manpath from system and environment variable.
     #[structopt(short, long)]
-    manpath: Option<PathBuf>,
+    manpath: bool,
+    /// Show progress bar.
     #[structopt(short, long)]
     progress: bool,
+    /// Directory to clean up.
     #[structopt(short, long)]
+    cleanup_in: Option<PathBuf>,
+    /// Keep files in target directory.
+    #[structopt(short, long)]
+    keep: bool,
+    /// Generate fish completions.
+    // TODO generate this in build.rs and remove this option
+    #[structopt(long)]
     completions: bool,
+    /// Files to parse and generate completions.
+    files: Vec<PathBuf>,
 }
-
-impl Opts {
-    fn read_from_stdin(&self) -> bool {
-        self.manpath.is_none() && self.files.is_empty()
-    }
-}
-
-// def usage(script_name):
-//     print("Usage: {0} [-v, --verbose] [-s, --stdout] [-d, --directory] [-p, --progress] files...".format(script_name))
-//     print("""Command options are:
-//      -h, --help\t\tShow this help message
-//      -v, --verbose [0, 1, 2]\tShow debugging output to stderr. Larger is more verbose.
-//      -s, --stdout\tWrite all completions to stdout (trumps the --directory option)
-//      -d, --directory [dir]\tWrite all completions to the given directory, instead of to ~/.local/share/fish/generated_completions
-//      -m, --manpath\tProcess all man1 and man8 files available in the manpath (as determined by manpath)
-//      -p, --progress\tShow progress
-//     """)
-
-// if __name__ == "__main__":
-//     script_name = sys.argv[0]
-//     try:
-//         opts, file_paths = getopt.gnu_getopt(sys.argv[1:], 'v:sd:hmpc:z', ['verbose=', 'stdout', 'directory=', 'cleanup-in=', 'help', 'manpath', 'progress'])
-//     except getopt.GetoptError as err:
-//         print(err.msg) # will print something like "option -a not recognized"
-//         usage(script_name)
-//         sys.exit(2)
-//
-//     # Directories within which we will clean up autogenerated completions
-//     # This script originally wrote completions into ~/.config/fish/completions
-//     # Now it writes them into a separate directory
-//     cleanup_directories = []
-//
-//     use_manpath, show_progress, custom_dir = False, False, False
-//     output_directory = ''
-//     for opt, value in opts:
-//         if opt in ('-v', '--verbose'):
-//             VERBOSITY = int(value)
-//         elif opt in ('-s', '--stdout'):
-//             WRITE_TO_STDOUT = True
-//         elif opt in ('-d', '--directory'):
-//             output_directory = value
-//         elif opt in ('-h', '--help'):
-//             usage(script_name)
-//             sys.exit(0)
-//         elif opt in ('-m', '--manpath'):
-//             use_manpath = True
-//         elif opt in ('-p', '--progress'):
-//             show_progress = True
-//         elif opt in ('-c', '--cleanup-in'):
-//             cleanup_directories.append(value)
-//         elif opt in ('-z',):
-//             DEROFF_ONLY = True
-//         else:
-//             assert False, "unhandled option"
-//
-//     if use_manpath:
-//         # Fetch all man1 and man8 files from the manpath or man.conf
-//         file_paths.extend(get_paths_from_man_locations())
-//
-//     if cleanup_directories:
-//         for cleanup_dir in cleanup_directories:
-//             cleanup_autogenerated_completions_in_directory(cleanup_dir)
-//
-//     if not file_paths:
-//         print("No paths specified")
-//         sys.exit(0)
-//
-//     if not WRITE_TO_STDOUT and not output_directory:
-//         # Default to ~/.local/share/fish/generated_completions/
-//         # Create it if it doesn't exist
-//         xdg_data_home = os.getenv('XDG_DATA_HOME', '~/.local/share')
-//         output_directory = os.path.expanduser(xdg_data_home + '/fish/generated_completions/')
-//         try:
-//             os.makedirs(output_directory)
-//         except OSError as e:
-//             if e.errno != errno.EEXIST:
-//                 raise
-//
-//     if not WRITE_TO_STDOUT:
-//         # Remove old generated files
-//         cleanup_autogenerated_completions_in_directory(output_directory)
-//
-//     parse_and_output_man_pages(file_paths, output_directory, show_progress)
 
 fn shell() -> String {
     std::path::Path::new(
@@ -1670,13 +1643,47 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
-    // TODO Make this less special case-y
-    if opts.read_from_stdin() && opts.stdout {
-        let mut stdin = std::io::stdin();
-        let mut stdout = std::io::stdout();
-        let mut app = App::default();
-        return Ok(app.single_man_page(&mut stdin, &mut stdout, "STDIN"));
+    // TODO: Set logging verbosity
+
+    if let Some(cleanup_dir) = opts.cleanup_in.as_ref() {
+        cleanup_autogenerated_completions_in_directory(cleanup_dir).ok();
     }
+
+    let mut paths = opts.files.clone();
+    if opts.manpath {
+        paths.extend(get_paths_from_man_locations());
+    }
+
+    if paths.is_empty() {
+        println!("No paths specified");
+        return Ok(());
+    }
+
+    let output_directory = opts.directory.clone().or_else(|| {
+        if opts.stdout {
+            None
+        } else {
+            let mut xdg_data_home = dirs::data_dir().unwrap();
+            xdg_data_home.push("fish/generated_completions/");
+            if !xdg_data_home.is_dir() {
+                std::fs::create_dir_all(&xdg_data_home).expect("Failed to create directory");
+            }
+            Some(xdg_data_home)
+        }
+    });
+
+    if let Some(output_directory) = output_directory.as_ref() {
+        if !opts.keep {
+            cleanup_autogenerated_completions_in_directory(output_directory).ok();
+        }
+    }
+
+    parse_and_output_man_pages(
+        &mut paths,
+        output_directory,
+        opts.progress,
+        opts.deroff_only,
+    );
 
     Ok(())
 }
@@ -1694,8 +1701,10 @@ mod tests {
     impl FileKind {
         fn content(self) -> &'static [u8] {
             match self {
-                FileKind::Good => b"    \n#Hello, world!\
-                    \n#Hello, world! Autogenerated      ",
+                FileKind::Good => {
+                    b"    \n#Hello, world!\
+                    \n#Hello, world! Autogenerated      "
+                }
                 FileKind::Bad => b"    Autogenerated     ",
             }
         }

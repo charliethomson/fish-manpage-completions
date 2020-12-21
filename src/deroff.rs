@@ -1,19 +1,18 @@
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/deroff.py
-// """ Deroff.py, ported to Python from the venerable deroff.c """
-use libflate::gzip::Decoder;
+/// Deroff, ported from deroff.py, which is ported from the venerable deroff.c
+use flate2::read::GzDecoder;
 use regex::Regex;
 
 use crate::util::TranslationTable;
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 
-type TODO_TYPE = u8;
-type TODO_NUMBER_TYPE = i8;
-
-const SKIP_LISTS: bool = false;
 const SKIP_HEADERS: bool = false;
 
+#[derive(PartialEq, Debug, Clone, Copy)]
 enum TblState {
     Options,
     Format,
@@ -21,7 +20,7 @@ enum TblState {
 }
 
 // class Deroffer:
-struct Deroffer {
+pub struct Deroffer {
     g_re_word: &'static Regex,
     g_re_number: &'static Regex,
     g_re_not_backslash_or_whitespace: &'static Regex,
@@ -34,16 +33,16 @@ struct Deroffer {
     tr: Option<TranslationTable>,
     specletter: bool,
     refer: bool,
-    r#macro: bool,
+    r#macro: u8,
     nobody: bool,
     inlist: bool,
     inheader: bool,
     pic: bool,
     tbl: bool,
     tblstate: TblState,
-    tblTab: String,
+    tbl_tab: String,
     eqn: bool,
-    output: String,
+    output: Cell<String>,
     skipheaders: bool,
     skiplists: bool,
     name: String,
@@ -52,12 +51,12 @@ struct Deroffer {
 }
 
 impl Deroffer {
-    fn new() -> Deroffer {
+    pub fn new() -> Deroffer {
         Deroffer {
-            g_re_word: crate::regex!(r##"[a-zA-Z_]+"##),
-            g_re_number: crate::regex!(r##"[+-]?\d+"##),
+            g_re_word: crate::regex!(r##"^[a-zA-Z_]+"##),
+            g_re_number: crate::regex!(r##"^[+-]?\d+"##),
             // sequence of not backslash or whitespace
-            g_re_not_backslash_or_whitespace: crate::regex!(r##"[^ \t\n\r\f\v\\]+"##),
+            g_re_not_backslash_or_whitespace: crate::regex!(r##"^[^ \t\n\r\f\v\\]+"##),
             g_re_newline_collapse: crate::regex!(r##"\n{3,}"##),
             g_re_font: crate::regex!(
                 r##"(?x)\\f(     # Starts with backslash f
@@ -73,16 +72,16 @@ impl Deroffer {
             tr: None,
             specletter: false,
             refer: false,
-            r#macro: false,
+            r#macro: 0,
             nobody: false,
             inlist: false,
             inheader: false,
             pic: false,
             tbl: false,
             tblstate: TblState::Options,
-            tblTab: String::new(),
+            tbl_tab: String::new(),
             eqn: false,
-            output: String::new(),
+            output: Cell::new(String::new()),
             skipheaders: false,
             skiplists: false,
             name: String::new(),
@@ -91,10 +90,13 @@ impl Deroffer {
         }
     }
 
-    fn get_output(&self, output: &[u8]) -> Result<String, String> {
-        let s = String::from_utf8(output.into())
-            .map_err(|err| format!("Bad bad bad (bad utf8)! {}", err))?;
-        Ok(self.g_re_newline_collapse.replace_all(&s, "\n").into())
+    /// Take the output, leaving the the default value.
+    pub fn get_output(&self) -> String {
+        let output = self.output.take();
+        match self.g_re_newline_collapse.replace_all(&output, "\n") {
+            Cow::Borrowed(_) => output,
+            Cow::Owned(result) => result,
+        }
     }
 
     // for the moment, return small strings, until we figure out what
@@ -367,7 +369,7 @@ impl Deroffer {
     }
 
     fn skip_char(&mut self, amount: usize) {
-        self.s.drain(..amount);
+        self.s.drain(0..amount);
     }
 
     fn skip_leading_whitespace(&mut self) {
@@ -380,20 +382,14 @@ impl Deroffer {
             .skip(idx)
             .next()
             .map(|(i, c)| &s[i..(i + c.len_utf8())])
-            .unwrap_or("")
+            .unwrap_or_default()
     }
 
     fn is_white(&self, idx: usize) -> bool {
-        self.s // String
-            .chars() // Chars
-            .nth(idx) // Option<char>
-            .unwrap_or('a') // char
-            .is_whitespace() // bool
-    }
-
-    // This is also known as `prch` apparently
-    fn not_whitespace(&self, idx: usize) -> bool {
-        !" \t\n".contains(self.s.get(idx..idx + 1).unwrap_or_default())
+        match self.str_at(idx) {
+            "" => false,
+            c => c.chars().all(|c| c.is_whitespace()),
+        }
     }
 
     fn digit(&self, idx: usize) -> bool {
@@ -403,8 +399,38 @@ impl Deroffer {
         }
     }
 
-    fn prch(&self, idx: usize) -> bool {
-        self.s.get(idx..=idx).map_or(false, |s| !" \t\n".contains(s))
+    fn comment(&mut self) -> bool {
+        let mut s = self.str_at(0);
+        while !s.is_empty() && s != "\n" {
+            self.skip_char(1);
+            s = self.str_at(0);
+        }
+
+        true
+    }
+
+    fn text_arg(&mut self) -> bool {
+        let mut got_something = false;
+        loop {
+            let possible = self.g_re_not_backslash_or_whitespace.find(&self.s);
+            if let Some(m) = possible {
+                // Output the characters in the match
+                self.condputs(m.as_str());
+                let end = m.end();
+                self.skip_char(end);
+                got_something = true;
+            }
+
+            if self.s.is_empty() || self.is_white(0) {
+                return got_something;
+            }
+
+            if !self.esc_char() {
+                self.condputs(self.str_at(0));
+                self.skip_char(1);
+                got_something = true;
+            }
+        }
     }
 
     // Replaces the g_macro_dict lookup in the Python code
@@ -457,98 +483,51 @@ impl Deroffer {
         }
     }
 
-    fn macro_sh(&self) -> bool {
-        unimplemented!()
-    }
-
-    /*
-    Handled by Kevin
     fn macro_sh(&mut self) -> bool {
-        for header_str in [" SYNOPSIS", " \"SYNOPSIS", " ‹BERSICHT", " \"‹BERSICHT"].iter() {
-            if self.s[2..].starts_with(header_str) {
-                self.inheader = true;
-                return true;
-            }
+        let headers = [" SYNOPSIS", " \"SYNOPSIS", " ‹BERSICHT", " \"‹BERSICHT"];
+        // @TODO: In the future s[2..] should care about UTF-8
+        if headers.iter().any(|header| self.s[2..].starts_with(header)) {
+            self.inheader = true;
+        } else {
+            self.inheader = false;
+            self.nobody = true;
         }
-
-        self.inheader = false;
-        self.nobody = true;
-        true
-    } */
-
-    fn macro_ss_ip(&self) -> bool {
-        unimplemented!()
+        false
     }
 
-    /*
-    Handled by Kevin
     fn macro_ss_ip(&mut self) -> bool {
         self.nobody = true;
         false
-    } */
-
-    fn macro_i_ir(&self) -> bool {
-        unimplemented!()
     }
 
-    /*
-    Handled by Kevin
     fn macro_i_ir(&mut self) -> bool {
-        // why does this exist
         false
-    } */
-
-    fn macro_nm(&self) -> bool {
-        unimplemented!()
     }
 
-    /*
-    Handled by Kevin
     fn macro_nm(&mut self) -> bool {
         if self.s == "Nm\n" {
-            self.condputs(self.name.clone().as_str());
+            self.condputs(&self.name);
         } else {
-            let mut s = self.s[3..].trim().to_owned();
-            s.push(' ');
-            self.name = s;
+            self.name = self.s.get(3..).unwrap_or_default().trim().into();
+            self.name.push(' ');
         }
-
         true
-    } */
-
-    fn macro_close_bracket(&self) -> bool {
-        unimplemented!()
     }
 
-    /*
-    Handled by Kevin
     fn macro_close_bracket(&mut self) -> bool {
         self.refer = false;
         false
-    } */
-
-    fn macro_ps(&self) -> bool {
-        unimplemented!()
     }
 
-    /*
-    Handled by Kevin
     fn macro_ps(&mut self) -> bool {
-        if Self::is_white(self.s.as_str(), 2) {
-            self.pic = true
+        if self.is_white(2) {
+            self.pic = true;
         }
         self.condputs("\n");
         true
-    } */
+    }
 
     fn macro_pe(&mut self) -> bool {
-        /*
-        def macro_pe(self):
-            if self.is_white(2):
-                self.pic = False
-            self.condputs("\n")
-            return True
-        */
         if self.is_white(2) {
             self.pic = false
         }
@@ -557,14 +536,6 @@ impl Deroffer {
     }
 
     fn macro_ts(&mut self) -> bool {
-        /*
-        def macro_ts(self):
-            if self.is_white(2):
-                self.tbl, self.tblstate = True, self.OPTIONS
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.tbl = true;
             self.tblstate = TblState::Options;
@@ -575,14 +546,6 @@ impl Deroffer {
     }
 
     fn macro_t_and(&mut self) -> bool {
-        /*
-        def macro_t_and(self):
-            if self.is_white(2):
-                self.tbl, self.tblstate = True, self.FORMAT
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.tbl = true;
             self.tblstate = TblState::Format;
@@ -593,14 +556,6 @@ impl Deroffer {
     }
 
     fn macro_te(&mut self) -> bool {
-        /*
-        def macro_te(self):
-            if self.is_white(2):
-                self.tbl = False
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.tbl = false
         }
@@ -610,14 +565,6 @@ impl Deroffer {
     }
 
     fn macro_eq(&mut self) -> bool {
-        /*
-        def macro_eq(self):
-            if self.is_white(2):
-                self.eqn = True
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.eqn = true
         }
@@ -627,14 +574,6 @@ impl Deroffer {
     }
 
     fn macro_en(&mut self) -> bool {
-        /*
-        def macro_en(self):
-            if self.is_white(2):
-                self.eqn = False
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.eqn = false
         }
@@ -644,17 +583,9 @@ impl Deroffer {
     }
 
     fn macro_r1(&mut self) -> bool {
-        /*
-        def macro_r1(self):
-            if self.is_white(2):
-                self.refer2 = True
-            self.condputs("\n")
-            return True
-        */
-
         // NOTE: self.refer2 is never used in the python source, so this and macro_r2 are
         // pretty much worthless
-        // if Self::is_white(self.s.as_str(), 2) {
+        // if self.is_white(2) {
         //     self.refer2 = true;
         // }
         self.condputs("\n");
@@ -662,15 +593,7 @@ impl Deroffer {
     }
 
     fn macro_r2(&mut self) -> bool {
-        /*
-            def macro_r2(self):
-            if self.is_white(2):
-                self.refer2 = False
-            self.condputs("\n")
-            return True
-        */
-
-        // if Self::is_white(self.s.as_str(), 2) {
+        // if self.is_white(2) {
         //     NOTE: See macro_r1
         //     self.refer2 = false;
         // }
@@ -679,26 +602,12 @@ impl Deroffer {
     }
 
     fn macro_de(&mut self) -> bool {
-        /*
-        def macro_de(self):
-            macro = True
-            self.condputs("\n")
-            return True
-        */
-        self.r#macro = true;
+        self.r#macro = 1;
         self.condputs("\n");
         true
     }
 
     fn macro_bl_vl(&mut self) -> bool {
-        /*
-        def macro_bl_vl(self):
-            if self.is_white(2):
-                self.inlist = True
-            self.condputs("\n")
-            return True
-        */
-
         if self.is_white(2) {
             self.inlist = true
         }
@@ -707,32 +616,22 @@ impl Deroffer {
     }
 
     fn macro_bv(&mut self) -> bool {
-        /*
-        def macro_bv(self):
-            if self.str_at(2) == "L" and self.white(self.str_at(3)):
-                self.inlist = True
-            self.condputs("\n")
-            return True
-        */
-
-        /*
-        `self.white` doesn't exist in the source, and the argument type is wrong
-        for `self.is_white`, so I don't know what function its supposed to be
-        if self.str_at(2) == "L" and self.white(self.str_at(3)):
-            self.inlist = true
-        } */
+        // TODO: Determine whether `self.white` is a bastardization of
+        // `self.is_white`. (Was self.white converted to self.is_white
+        // but this call site was missed?)
+        //
+        // If it _were_ a valid function, the original Python source
+        // would translate roughly to:
+        //
+        //     for `self.is_white`, so I don't know what function its supposed to be
+        //     if self.str_at(2) == "L" and self.white(self.str_at(3)):
+        //         self.inlist = true
+        //     }
         self.condputs("\n");
         true
     }
 
     fn macro_le(&mut self) -> bool {
-        /*
-        def macro_le(self):
-            if self.is_white(2):
-                self.inlist = False
-            self.condputs("\n")
-            return True
-        */
         if self.is_white(2) {
             self.inlist = false;
         }
@@ -741,61 +640,21 @@ impl Deroffer {
     }
 
     fn macro_lp_pp(&mut self) -> bool {
-        /*
-        def macro_lp_pp(self):
-            self.condputs("\n")
-            return True
-        */
         self.condputs("\n");
         true
     }
 
     fn macro_ds(&mut self) -> bool {
-        /*
-        def macro_ds(self):
-            self.skip_char(2)
-            self.skip_leading_whitespace()
-            if self.str_at(0):
-                # Split at whitespace
-                comps = self.s.split(None, 2)
-                if len(comps) == 2:
-                    name, value = comps
-                    value = value.rstrip()
-                    self.reg_table[name] = value
-            self.condputs("\n")
-            return True
-        */
-
+        // Yuck
         self.skip_char(2);
         self.skip_leading_whitespace();
 
         if !self.str_at(0).is_empty() {
-            let comps: Vec<String> = self.s.splitn(2, " ").map(|s| s.to_owned()).collect();
+            let comps: Vec<String> = self.s.splitn(2, " ").map(|s| s.into()).collect();
 
             if comps.len() == 2 {
-                let name: String = comps.get(0).unwrap().to_owned();
-                /*
-                This is a reminder to google stuff before you go implementing stuff badly
-
-                // This is horrible I know but it's meant to do string.rstrip()
-                // If you can think of a better way I am more than willing to switch it
-                let value: String = comps
-                            .get(1)
-                            .unwrap() // This is safe (len 2)
-                            .chars()
-                            .rev() // reverse the string to get the right side
-                            .skip_while(|c| c.is_whitespace()) // Skip any whitespace
-                            .collect::<String>() // collect it
-                            .chars()
-                            .rev() // make the string face the right way
-                            .collect(); // put it back in a String
-                // A note on the badness of this code,
-                // The reason for `.collect().rev().chars().collect()` exists is
-                // `skip_while` returns a `SkipWhile` which doesnt impl `DoubleEndedIterator`
-                // which is required for `rev` :( */
-
-                let value = comps.get(1).unwrap().as_str().trim_end().to_owned();
-
+                let name: String = comps.get(0).unwrap().into();
+                let value = comps.get(1).unwrap().trim_end().into();
                 self.reg_table.insert(name, value);
             }
         }
@@ -804,123 +663,75 @@ impl Deroffer {
         true
     }
 
-    fn macro_so_nx(&self) -> bool {
-        unimplemented!()
-    }
-
-    fn macro_tr(&self) -> bool {
-        unimplemented!()
-    }
-
-    /*
-    handled by Kevin
     fn macro_so_nx(&mut self) -> bool {
         /*  # We always ignore include directives
-            # deroff.c for some reason allowed this to fall through to the 'tr' case
-            # I think that was just a bug so I won't replicate it */
+        # deroff.c for some reason allowed this to fall through to the 'tr' case
+        # I think that was just a bug so I won't replicate it */
         true
     }
 
-    handled by Anders
     fn macro_tr(&mut self) -> bool {
-        let s = self.s.clone();
-        let s = s.as_str();
-        self.s = self.skip_char(s, Some(2)).to_owned();
-        self.s = self.skip_leading_whitespace(s).to_owned();
-        while !self.s.is_empty() && Self::str_at(s, 0) != "\n" {
-            let c = Self::str_at(s, 0);
-            let mut ns = Self::str_at(s, 1);
-            self.s = self.skip_char(self.s.as_str(), Some(2)).to_owned();
-            if ns.is_empty() || ns == "\n" {
-                ns = " ";
-            }
+        self.skip_char(2);
+        self.skip_leading_whitespace();
 
-            self.tr_from.push_str(c);
-            self.tr_to.push_str(ns);
+        while !self.s.is_empty() && &self.s[0..=0] != "\n" {
+            self.tr_from.push_str(&self.s[0..=0]);
+
+            let ns = &self.s[1..=1];
+            self.tr_to
+                .push_str(if ns.is_empty() || ns == "\n" { " " } else { ns });
+
+            self.skip_char(2);
         }
 
         // Update our table, then swap in the slower tr-savvy condputs
-        self.tr = Some(maketrans(self.tr_from.as_str(), self.tr_to.as_str()));
+        self.tr = match TranslationTable::new(&self.tr_from, &self.tr_to) {
+            Ok(table) => Some(table),
+            Err(e) => panic!(
+                "Encountered an error creating a new translation table from {}, {}: {}",
+                self.tr_from, self.tr_to, e
+            ),
+        };
         true
-    } */
+    }
 
     fn macro_sp(&mut self) -> bool {
-        /*
-        def macro_sp(self):
-            self.condputs("\n")
-            return True
-        */
-
         self.condputs("\n");
         true
     }
 
     fn macro_other(&mut self) -> bool {
-        /*
-        def macro_other(self):
-            self.condputs("\n")
-            return True
-        */
-
         self.condputs("\n");
         true
     }
 
-    /// `condputs` (cond)itionally (puts) `s` into `self.output`
-    /// if `self.tr` is set, instead of putting `s` into `self.output` directly,
-    /// it `translate`s it using the set translation table and puts the result
-    /// into `self.output`
-    fn condputs(&mut self, s: &str) {
-        let is_special =
-            { self.pic || self.eqn || self.refer || self.r#macro || self.inlist || self.inheader };
-
-        if !is_special {
-            if let Some(table) = &self.tr {
-                self.output.push_str(&table.translate(s.into()));
-            } else {
-                self.output.push_str(s);
-            }
-        }
-    }
-
-    fn quoted_arg(&self) -> bool {
-        unimplemented!()
-    }
-
     fn request_or_macro(&mut self) -> bool {
+        // self.s[0] is a period or open single quote
         self.skip_char(1);
 
-        let s0 = &self.s[1..2];
-
-        match s0 {
-            "\\" => {
-                if self.str_at(1) == "\"" {
-                    self.condputs("\n");
-                    return true;
-                }
-            }
-            "[" => {
+        match self.s.chars().nth(1) {
+            Some('[') => {
                 self.refer = true;
                 self.condputs("\n");
                 return true;
             }
-            "]" => {
+            Some(']') => {
                 self.refer = false;
                 self.skip_char(1);
                 return self.text();
             }
-            "." => {
-                self.r#macro = false;
+            Some('.') => {
+                self.r#macro = 0;
                 self.condputs("\n");
                 return true;
             }
-            _ => (),
-        };
+            _ => {}
+        }
 
         self.nobody = false;
-        let s0s1 = self.s[..2].to_owned();
+        let s0s1 = self.s.chars().take(2).collect::<String>();
 
-        if self.g_macro_dispatch(s0s1.as_str()) {
+        if self.g_macro_dispatch(&s0s1) {
             return true;
         }
 
@@ -929,19 +740,14 @@ impl Deroffer {
         }
 
         self.skip_leading_whitespace();
-
         while !self.s.is_empty() && !self.is_white(0) {
             self.skip_char(1);
         }
-
         self.skip_leading_whitespace();
-
         loop {
             if !self.quoted_arg() && !self.text_arg() {
                 if !self.s.is_empty() {
-                    // This is bad
-                    let s = &self.str_at(0).to_owned();
-                    self.condputs(s);
+                    self.condputs(self.str_at(0));
                     self.skip_char(1);
                 } else {
                     return true;
@@ -951,50 +757,35 @@ impl Deroffer {
     }
 
     fn font(&mut self) -> bool {
-        if let Some(m) = self.g_re_font.find(&self.s.to_owned()) {
-            self.skip_char(m.end());
+        if let Some(m) = self.g_re_font.find(&self.s) {
+            let end = m.end();
+            self.skip_char(end);
             true
         } else {
             false
         }
     }
 
-    fn comment(&self) -> bool {
-        unimplemented!()
-    }
-
     fn numreq(&mut self) -> bool {
-        // In the python, it has a check that is already handled in esc_char_backslash, which is
-        // the only place it gets called, so I'll omit that check here
+        if !"hvwud".contains(self.str_at(1)) || self.str_at(2) != "'" {
+            return false;
+        }
 
-        // This is written as `self.macro += 1` in the source, but I dont know why
-        // it does the same thing (false -> true, true -> still true) :shrug:
-        // self.r#macro = true;
-        // Upon further investigation, this is the weirdest function ever
-        // This is just a state placeholder thing
-        let mut m = self.r#macro as u8 + 1;
+        self.r#macro += 1;
 
         self.skip_char(3);
 
-        // There's this, which has a comment explaining my thoughts right now
-        /*
-        while self.str_at(0) != "'" and self.esc_char():
-            pass  # Weird
-        */
-        // And I dont know what the purpose of it would even be, if you can tell, lmk
+        // This is weird, but it was in the source so it's here now.
+        // I think this skips characters until we hit a '
+        while self.str_at(0) != "'" && self.esc_char() {}
 
-        if self.str_at(0) == "\'" {
+        if self.str_at(0) == "'" {
             self.skip_char(1);
         }
 
-        m -= 1;
-        self.r#macro = m != 0;
+        self.r#macro -= 1;
 
         true
-    }
-
-    fn text_arg(&self) -> bool {
-        unimplemented!()
     }
 
     // This function is the worst, there are a few comments explaining some of it in the test (test_var)
@@ -1005,20 +796,21 @@ impl Deroffer {
     // NOTE: there is a call to text_arg that is commented out because it's not implemented, so the
     // tests will need revised when it gets implemented
     fn var(&mut self) -> bool {
-        let s0s1 = &self.s[0..2];
+        let s0s1 = self.s.chars().take(2).collect::<String>();
+
         if s0s1 == "\\n" {
-            if Some("dy") == self.s.get(3..5)
-                || (self.str_at(2) == "(" && self.prch(3) && self.prch(4))
+            if "dy" == self.s.chars().skip(3).take(2).collect::<String>()
+                || (self.str_at(2) == "(" && self.not_whitespace(3) && self.not_whitespace(4))
             {
                 self.skip_char(5);
                 return true;
-            } else if self.str_at(2) == "[" && self.prch(3) {
+            } else if self.str_at(2) == "[" && self.not_whitespace(3) {
                 self.skip_char(3);
                 while !self.str_at(0).is_empty() && self.str_at(0) != "]" {
                     self.skip_char(1);
                 }
                 return true;
-            } else if self.prch(2) {
+            } else if self.not_whitespace(2) {
                 self.skip_char(3);
                 return true;
             } else {
@@ -1026,20 +818,23 @@ impl Deroffer {
             }
         } else if s0s1 == "\\*" {
             let mut reg = String::new();
-            if self.str_at(2) == "(" && self.prch(3) && self.prch(4) {
+            if self.str_at(2) == "(" && self.not_whitespace(3) && self.not_whitespace(4) {
                 reg = self.s[3..5].to_owned();
                 self.skip_char(5);
-            } else if self.str_at(2) == "[" && self.prch(3) {
+            } else if self.str_at(2) == "[" && self.not_whitespace(3) {
                 self.skip_char(3);
                 while !self.str_at(0).is_empty() && self.str_at(0) != "]" {
                     reg.push_str(self.str_at(0));
                     self.skip_char(1);
                 }
-                if let Some("]") = self.s.get(0..1) {
+                if let Some(']') = self.s.chars().next() {
                     self.skip_char(1);
                 } else {
                     return false;
                 }
+            } else if self.not_whitespace(2) {
+                reg = self.str_at(2).to_owned();
+                self.skip_char(3);
             } else {
                 return false;
             }
@@ -1047,19 +842,18 @@ impl Deroffer {
             if self.reg_table.contains_key(&reg) {
                 // This unwrap is safe because of the if
                 self.s = self.reg_table.get(&reg).unwrap().to_owned();
-                // This is unimplemented, so tests fail:
-                // self.text_arg();
-                return true;
+                self.text_arg();
+                true
             } else {
-                return false;
+                false
             }
         } else {
-            return false;
+            false
         }
     }
 
     fn size(&mut self) -> bool {
-        /* # We require that the string starts with \s */
+        // We require that the string starts with \s
         if self.digit(2) || ("-+".contains(self.str_at(2)) && self.digit(3)) {
             self.skip_char(3);
             while self.digit(0) {
@@ -1072,28 +866,29 @@ impl Deroffer {
     }
 
     fn esc(&mut self) -> bool {
-        /* # We require that the string start with backslash */
-        // self.s.get(1..2).
-        match self.s.to_owned().get(1..2) {
-            Some(a) => match a {
-                "e" | "E" => self.condputs("\\"),
-                "t" => self.condputs("\t"),
-                "0" | "~" => self.condputs(" "),
-                "|" | "^" | "" | ":" => (),
-                o => self.condputs(o),
-            },
-            None => return false,
-        };
-        self.skip_char(2);
-        true
+        // We require that the string start with backslash
+        if let Some(c) = self.s.chars().nth(1) {
+            match c {
+                'e' | 'E' => self.condputs("\\"),
+                't' => self.condputs("\t"),
+                '0' | '~' => self.condputs(" "),
+                '|' | '^' | '&' | ':' => (),
+                _ => self.condputs(c.to_string()),
+            };
+            self.skip_char(2);
+            true
+        } else {
+            false
+        }
     }
 
     fn word(&mut self) -> bool {
         let mut got_something = false;
-        while let Some(m) = self.g_re_word.find(&self.s.clone()) {
+        while let Some(m) = self.g_re_word.find(&self.s) {
             got_something = true;
             self.condputs(m.as_str());
-            self.skip_char(m.end());
+            let end = m.end();
+            self.skip_char(end);
 
             while self.spec() {
                 if !self.specletter {
@@ -1106,35 +901,54 @@ impl Deroffer {
 
     fn text(&mut self) -> bool {
         loop {
-            if let Some(idx) = self.s.clone().find("\\") {
-                self.condputs(self.s.clone().get(..idx).unwrap_or("")); // TODO: Fix! this may cause bugs later
+            if let Some(idx) = self.s.find("\\") {
+                self.condputs(&self.s[..idx]);
                 self.skip_char(idx);
                 if !self.esc_char_backslash() {
-                    self.condputs(self.s.clone().get(0..1).unwrap_or("")); // TODO: Fix! this may cause bugs later
+                    self.condputs(self.str_at(0));
                     self.skip_char(1);
                 }
             } else {
-                self.condputs(&self.s.clone());
+                self.condputs(&self.s);
                 self.s = String::new();
-                break;
+                return true;
             }
         }
-        true
     }
 
-    fn spec(&self) -> bool {
-        unimplemented!()
+    fn spec(&mut self) -> bool {
+        self.specletter = false;
+
+        if self.s.get(..2) == Some("\\(") && self.not_whitespace(2) && self.not_whitespace(3) {
+            let key = self.s.get(2..4).unwrap_or_default();
+
+            if let Some(value) = Self::g_specs_specletter(key) {
+                self.condputs(value);
+                self.specletter = true;
+            } else if let Some(value) = Self::g_specs(key) {
+                self.condputs(value);
+            }
+
+            self.skip_char(4);
+            true
+        } else if self.s.starts_with("\\%") {
+            self.specletter = true;
+            self.skip_char(2);
+            true
+        } else {
+            false
+        }
     }
 
     fn esc_char_backslash(&mut self) -> bool {
-        if let Some(c) = self.s.get(1..2) {
+        if let Some(c) = self.s.chars().nth(1) {
             match c {
-                "\"" => self.comment(),
-                "f" => self.font(),
-                "s" => self.size(),
-                "h" | "v" | "w" | "u" | "d" => self.numreq(),
-                "n" | "*" => self.var(),
-                "(" => self.spec(),
+                '"' => self.comment(),
+                'f' => self.font(),
+                's' => self.size(),
+                'h' | 'v' | 'w' | 'u' | 'd' => self.numreq(),
+                'n' | '*' => self.var(),
+                '(' => self.spec(),
                 _ => self.esc(),
             }
         } else {
@@ -1142,106 +956,743 @@ impl Deroffer {
         }
     }
 
-    fn deroff(&mut self, string: String) {
-        unimplemented!()
+    /// AKA `prch`
+    fn not_whitespace(&self, idx: usize) -> bool {
+        // # Note that this return False for the empty string (idx >= len(self.s))
+        // ch = self.s[idx:idx+1]
+        // return ch not in ' \t\n'
+        // TODO Investigate checking for ASCII whitespace after mvp
+        self.s
+            .chars()
+            .nth(idx)
+            .map(|op| !op.is_whitespace())
+            .unwrap_or_default()
+    }
+    /// `condputs` (cond)itionally (puts) `s` into `self.output`
+    /// if `self.tr` is set, instead of putting `s` into `self.output` directly,
+    /// it `translate`s it using the set translation table and puts the result
+    /// into `self.output`
+    fn condputs<S: AsRef<str>>(&self, s: S) {
+        let s = s.as_ref();
+        let is_special = {
+            self.pic || self.eqn || self.refer || self.r#macro != 0 || self.inlist || self.inheader
+        };
+
+        if !is_special {
+            let mut o = self.output.take();
+            if let Some(table) = &self.tr {
+                o.push_str(&table.translate(s));
+            } else {
+                o.push_str(s);
+            }
+            self.output.set(o);
+        }
     }
 
     fn flush_output<W: std::io::Write>(&mut self, mut write: W) {
+        write.write(self.get_output().as_bytes()).unwrap();
         write.flush().unwrap()
+    }
+
+    fn number(&mut self) -> bool {
+        if let Some(mat) = self.g_re_number.find(&self.s) {
+            self.condputs(mat.as_str());
+            let end = mat.end();
+            self.skip_char(end);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn esc_char(&mut self) -> bool {
+        if self.s.chars().next() == Some('\\') {
+            self.esc_char_backslash()
+        } else {
+            self.word() || self.number()
+        }
+    }
+
+    fn quoted_arg(&mut self) -> bool {
+        if self.str_at(0) == "\"" {
+            // We've now entered a portion of the source that should be
+            // surrounded by double quotes. (We've found the first one—really
+            // hoping we find its mate later).
+            self.skip_char(1);
+            while !self.s.is_empty() && self.str_at(0) != "\"" {
+                if !self.esc_char() {
+                    self.condputs(self.str_at(0));
+                    self.skip_char(1);
+                }
+            }
+            // We've run past the end of the string OR we've found the closing
+            // double-quote to match the initial one we found at the start of
+            // the function.
+            true
+        } else {
+            // We don't start with quotes!
+            false
+        }
+    }
+
+    fn do_tbl(&mut self) -> bool {
+        match self.tblstate {
+            TblState::Options => {
+                while !self.s.is_empty() && !"\n;".contains(self.str_at(0)) {
+                    self.skip_leading_whitespace();
+
+                    if !self.str_at(0).chars().all(|c| c.is_alphabetic()) {
+                        self.skip_char(1);
+                    } else {
+                        // Parse option
+
+                        // find first non-alphabetic character
+                        match self.s.char_indices().find(|(_, c)| !c.is_alphabetic()) {
+                            Some((idx, '(')) => {
+                                // self.s -> option '(' arg ')' rest
+                                let option = &self.s[..idx];
+                                let mut iter = self.s[idx + 1..].splitn(2, ')');
+                                let arg = iter.next().unwrap_or_default();
+                                let rest = iter.next().unwrap_or_default();
+
+                                if option.to_lowercase() == "tab" {
+                                    self.tbl_tab = arg.get(0..1).unwrap_or_default().to_owned();
+                                }
+
+                                self.s = rest.to_owned();
+                            }
+                            _ => self.s.clear(),
+                        }
+                    }
+                }
+                self.tblstate = TblState::Format;
+                self.condputs("\n");
+            }
+            TblState::Format => {
+                while !self.s.is_empty() && !".\n".contains(self.str_at(0)) {
+                    self.skip_leading_whitespace();
+                    if !self.str_at(0).is_empty() {
+                        self.skip_char(1);
+                    }
+                }
+
+                if self.str_at(0) == "." {
+                    self.tblstate = TblState::Data;
+                }
+                self.condputs("\n");
+            }
+            TblState::Data => {
+                if !self.tbl_tab.is_empty() {
+                    self.s = self.s.replace(&self.tbl_tab, "\t");
+                }
+
+                self.text();
+            }
+        }
+
+        true
+    }
+
+    fn do_line(&mut self) -> bool {
+        match self
+            .s
+            .bytes()
+            .next()
+            .expect("`do_line` called when `self.s` was empty")
+        {
+            b'.' | b'\'' => self.request_or_macro(),
+            _ => {
+                if self.tbl {
+                    self.do_tbl()
+                } else {
+                    self.text()
+                }
+            }
+        }
+    }
+
+    pub fn deroff(&mut self, s: String) {
+        let lines = s.split('\n');
+        for line in lines {
+            self.s = line.to_owned() + "\n";
+            if !self.do_line() {
+                break;
+            }
+        }
     }
 }
 
-fn deroff_files(files: &[String]) -> std::io::Result<()> {
-    for arg in files {
-        eprintln!("processing deroff file: {}", arg);
+#[test]
+fn test_comment() {
+    let mut deroffer = Deroffer::new();
 
+    deroffer.s = "\n".to_owned();
+    deroffer.comment();
+    assert_eq!(deroffer.s, "\n".to_owned());
+
+    deroffer.s = "hello\n".to_owned();
+    deroffer.comment();
+    assert_eq!(deroffer.s, "\n".to_owned());
+
+    deroffer.s = "hello\nworld".to_owned();
+    deroffer.comment();
+    assert_eq!(deroffer.s, "\nworld".to_owned());
+}
+
+fn deroff_files(files: &[String]) -> io::Result<()> {
+    for arg in files {
+        eprintln!("{}", arg);
         let mut file = File::open(arg)?;
         let mut string = String::new();
         if arg.ends_with(".gz") {
-            let mut decoder = Decoder::new(file).unwrap();
-            decoder.read_to_string(&mut string);
+            let mut decoder = GzDecoder::new(file);
+            decoder.read_to_string(&mut string)?;
         } else {
-            file.read_to_string(&mut string)?;
-        }
-        let mut d = Deroffer::new();
-        println!("string: {}", string);
+            match file.read_to_string(&mut string) {
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    // not valid UTF-8
+                    // TODO: This is a _bad_ workaround for latin1, we need to correctly decode input files
+                    let mut bytes = Vec::new();
+                    file.read_to_end(&mut bytes)?;
 
-        d.deroff(string);
-        d.flush_output(std::io::stdout());
+                    for byte in bytes {
+                        string.push(byte as char);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("unknown error {:?}", e);
+                    continue;
+                }
+                Ok(_) => {}
+            };
+        }
+
+        let mut deroffer = Deroffer::new();
+        deroffer.deroff(string);
+        deroffer.flush_output(io::stdout());
     }
+
     Ok(())
+}
+
+#[test]
+fn test_text_arg() {
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.text_arg());
+    assert_eq!(deroffer.s, " World!");
+    assert_eq!(deroffer.output.take(), "Hello");
+
+    let mut deroffer = Deroffer::new();
+    assert!(!deroffer.text_arg());
+    assert!(deroffer.s.is_empty());
+    assert!(deroffer.output.take().is_empty());
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "\t\n\t           \t\n".into();
+    assert!(!deroffer.text_arg());
+    assert_eq!(deroffer.s, "\t\n\t           \t\n");
+    assert!(deroffer.output.take().is_empty());
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = r"\r".into();
+    assert!(!deroffer.text_arg());
+    assert!(deroffer.s.is_empty());
+    assert_eq!(deroffer.output.take(), "r");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "Applebees".into();
+    assert!(deroffer.text_arg());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Applebees");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "忍一时风平浪静，退一步海阔天空。".into();
+    assert!(deroffer.text_arg());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "忍一时风平浪静，退一步海阔天空。");
+}
+
+#[test]
+fn test_font() {
+    let mut deroffer = Deroffer::new();
+    deroffer.s = r"\f(aa)lemon".into();
+    assert!(deroffer.font());
+    assert_eq!(deroffer.s, ")lemon");
+    assert!(!deroffer.font());
+    assert_eq!(deroffer.s, ")lemon");
+}
+
+#[test]
+fn test_numreq() {
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "Hello World!".into();
+    assert!(!deroffer.numreq());
+    assert_eq!(deroffer.s, "Hello World!");
+    assert!(deroffer.output.take().is_empty());
+
+    deroffer.s = r"\w'Apple'".into();
+    assert!(deroffer.numreq());
+    assert!(deroffer.s.is_empty());
+    assert!(deroffer.output.take().is_empty());
+
+    deroffer.s = r"\w'Hello\tWorld!'".into();
+    assert!(deroffer.numreq());
+    assert_eq!(deroffer.s, "!'");
+    assert!(deroffer.output.take().is_empty());
+}
+
+#[test]
+fn test_size() {
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "Hello World!".into();
+    assert!(!deroffer.size());
+
+    deroffer.s = r"\s10Hello World!".into();
+    assert!(deroffer.size());
+    assert_eq!(deroffer.s, "Hello World!");
+
+    deroffer.s = r"\s-11 ignore me".into();
+    assert!(deroffer.size());
+    assert_eq!(deroffer.s, " ignore me");
+
+    assert!(deroffer.output.take().is_empty());
+}
+
+#[test]
+fn test_esc() {
+    let mut deroffer = Deroffer::new();
+    assert!(!deroffer.esc());
+
+    // This is UB, but it's the same UB as the python
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.esc());
+    assert_eq!(deroffer.output.take(), "\\");
+
+    deroffer.s = r"\E".into();
+    assert!(deroffer.esc());
+    assert_eq!(deroffer.output.take(), "\\");
+    deroffer.s = r"\t".into();
+    assert!(deroffer.esc());
+    assert_eq!(deroffer.output.take(), "\t");
+
+    deroffer.s = r"\~".into();
+    assert!(deroffer.esc());
+    assert_eq!(deroffer.output.take(), " ");
+
+    deroffer.s = r"\|".into();
+    assert!(deroffer.esc());
+    assert!(deroffer.output.take().is_empty());
+
+    deroffer.s = r"\apple".into();
+    assert!(deroffer.esc());
+    assert_eq!(deroffer.output.take(), "a");
+    assert_eq!(deroffer.s, "pple");
+}
+
+#[test]
+fn test_word() {
+    let mut deroffer = Deroffer::new();
+
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.word());
+    assert_eq!(deroffer.s, " World!");
+    assert_eq!(deroffer.output.take(), "Hello");
+
+    deroffer.s = "Hello\\(ps".into();
+    assert!(deroffer.word());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello¶");
+
+    deroffer.s = "100 thousand".into();
+    assert!(!deroffer.word());
+    assert_eq!(deroffer.s, "100 thousand");
+    assert_eq!(deroffer.output.take(), "");
+}
+
+#[test]
+fn test_text() {
+    let mut deroffer = Deroffer::new();
+
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello World!");
+
+    deroffer.s = "Hello\tWorld!".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello\tWorld!");
+
+    deroffer.s = "Hello\\(psWorld!".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello¶World!");
+
+    deroffer.s = "Hello 10 World!".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello 10 World!");
+
+    deroffer.s = "你好世界！".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "你好世界！");
+}
+
+#[test]
+fn test_esc_char_backslash() {
+    let mut deroffer = Deroffer::new();
+
+    deroffer.s = r#"\"This is a comment, it will be ignored"#.into();
+    assert!(deroffer.esc_char_backslash());
+    assert!(deroffer.s.is_empty());
+
+    // This gets passed to `font`, so i stole a test from there
+    deroffer.s = r"\f(aa)lemon".into();
+    assert!(deroffer.esc_char_backslash());
+    assert_eq!(deroffer.s, ")lemon");
+
+    // This gets passed to `size`
+    deroffer.s = r"\s-11 ignore me".into();
+    assert!(deroffer.esc_char_backslash());
+    assert_eq!(deroffer.s, " ignore me");
+
+    // You get the idea
+    // Taken from numreq
+    deroffer.s = r"\w'Apple'".into();
+    assert!(deroffer.esc_char_backslash());
+    assert!(deroffer.s.is_empty());
+    assert!(deroffer.output.take().is_empty());
+
+    // Taken from var
+    deroffer.s = "\\*[test_reg]".to_owned();
+    deroffer
+        .reg_table
+        .insert("test_reg".to_owned(), "It me!".to_owned());
+    assert!(deroffer.esc_char_backslash());
+    assert_eq!(deroffer.s, " me!");
+    assert!(deroffer.output.take().contains("It"));
+
+    // Taken from spec
+    deroffer.s = "\\(Sdaaaa".into(); // `ð`
+    assert!(deroffer.esc_char_backslash());
+    assert!(deroffer.specletter);
+    assert_eq!(deroffer.output.take(), "ð");
+    assert_eq!(deroffer.s, "aaaa");
+
+    // Taken from esc
+    deroffer.s = r"\E".into();
+    assert!(deroffer.esc_char_backslash());
+    assert_eq!(deroffer.output.take(), "\\");
+
+    // This is UB, but it's the same UB as the python
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.esc_char_backslash());
+    assert_eq!(deroffer.output.take(), "\\");
+}
+
+#[test]
+fn test_esc_char() {
+    // Gets passed to esc_char_backslash, stealing one test to make sure it works
+    let mut deroffer = Deroffer::new();
+    deroffer.s = r#"\"This is a comment, it will be ignored"#.into();
+    assert!(deroffer.esc_char());
+    assert!(deroffer.s.is_empty());
+
+    // Will get passed to word, stealing a test
+    deroffer.s = "Hello\\(ps".into();
+    assert!(deroffer.esc_char());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello¶");
+
+    // Will get passed to number, stealing a test
+    deroffer.s = String::from("4343xx7");
+    assert_eq!(deroffer.number(), true);
+    assert_eq!(deroffer.output.take(), "4343".to_string());
+}
+
+#[test]
+fn test_quoted_arg() {
+    let mut deroffer = Deroffer::new();
+    deroffer.s = r#""Hello World!""#.into();
+    assert!(deroffer.quoted_arg());
+    assert_eq!(deroffer.s, "\"");
+    assert_eq!(deroffer.output.take(), "Hello World!");
+
+    deroffer.s = r#""Hello\(psWorld""#.into();
+    assert!(deroffer.quoted_arg());
+    assert_eq!(deroffer.s, "\"");
+    assert_eq!(deroffer.output.take(), "Hello¶World");
+}
+
+#[test]
+fn test_do_line() {
+    let mut deroffer = Deroffer::new();
+
+    // Gets passed to request_or_macro, stealing a test
+    deroffer.s = ".SH".into();
+    assert!(deroffer.do_line());
+    assert!(deroffer.s.is_empty());
+    assert!(deroffer.output.take().is_empty());
+
+    // same, to_tbl
+    deroffer.s = "aaa(bbb);Hello World!".into();
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert_eq!(deroffer.s, ";Hello World!");
+    assert_eq!(deroffer.output.take(), "\n");
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    // same, text
+    deroffer.s = "Hello\\(psWorld!".into();
+    assert!(deroffer.text());
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello¶World!");
+}
+
+#[test]
+fn test_request_or_macro() {
+    let mut deroffer = Deroffer::new();
+
+    deroffer.s = "'_[Hello".into();
+    assert!(deroffer.request_or_macro());
+    assert!(deroffer.refer);
+    assert_eq!(deroffer.s, "_[Hello");
+    assert!(deroffer.output.take().is_empty());
+
+    deroffer.s = "'_]Hello".into();
+    assert!(deroffer.request_or_macro());
+    assert!(!deroffer.refer);
+    assert!(deroffer.s.is_empty());
+    assert_eq!(deroffer.output.take(), "]Hello");
+
+    deroffer.s = "'_.Hello".into();
+    assert!(deroffer.request_or_macro());
+    assert!(deroffer.r#macro == 0);
+    assert_eq!(deroffer.s, "_.Hello");
+    assert_eq!(deroffer.output.take(), "\n");
+
+    deroffer.s = ".SH".into();
+    assert!(deroffer.request_or_macro());
+    assert!(deroffer.s.is_empty());
+    assert!(deroffer.output.take().is_empty());
+
+    deroffer.s = ".] Hello World".into();
+    assert!(deroffer.request_or_macro());
+    assert!(deroffer.s.is_empty());
+    assert_eq!(deroffer.output.take(), "Hello World");
+}
+
+#[test]
+fn test_deroff() {}
+
+#[test]
+fn test_deroff_files() {}
+
+#[test]
+fn test_do_tbl() {
+    // I made this based on the python source to make sure it's doing the right things
+    // also, I create new deroffers for each test to reset the shared state
+
+    // <Options>
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+
+    deroffer.s = "aaa(bbb);Hello World!".into();
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert_eq!(deroffer.s, ";Hello World!");
+    assert_eq!(deroffer.output.take(), "\n");
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+    deroffer.s = "aaa(bbb;Hello World!".into();
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert!(deroffer.s.is_empty());
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+    deroffer.s = ";".into();
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert_eq!(deroffer.s, ";");
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+    deroffer.s = "\n".into();
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert_eq!(deroffer.s, "\n");
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+    assert!(deroffer.do_tbl());
+    assert!(deroffer.tbl_tab.is_empty());
+    assert!(deroffer.s.is_empty());
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Options;
+    deroffer.s = "Tab(arg);".into();
+    assert!(deroffer.do_tbl());
+    assert_eq!(deroffer.tbl_tab, "a");
+    assert_eq!(deroffer.s, ";");
+    assert_eq!(deroffer.tblstate, TblState::Format);
+
+    // </Options>
+
+    // <Format>
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Format;
+    deroffer.s = "Hello World!".into();
+    assert!(deroffer.do_tbl());
+    assert_ne!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.output.take(), "\n");
+    assert!(deroffer.s.is_empty());
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Format;
+    deroffer.s = "".into();
+    assert!(deroffer.do_tbl());
+    assert_ne!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.output.take(), "\n");
+    assert!(deroffer.s.is_empty());
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Format;
+    deroffer.s = "Hello World!.foo bar!".into();
+    assert!(deroffer.do_tbl());
+    assert_eq!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.s, ".foo bar!");
+    assert_eq!(deroffer.output.take(), "\n");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Format;
+    deroffer.s = "\n".into();
+    assert!(deroffer.do_tbl());
+    assert_ne!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.s, "\n");
+    assert_eq!(deroffer.output.take(), "\n");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Format;
+    deroffer.s = ".".into();
+    assert!(deroffer.do_tbl());
+    assert_eq!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.s, ".");
+    assert_eq!(deroffer.output.take(), "\n");
+
+    // </Format>
+    // <Data>
+
+    let mut deroffer = Deroffer::new();
+    deroffer.tblstate = TblState::Data;
+    deroffer.tbl_tab = "a".into();
+
+    deroffer.s = "HelloaWorld!".into();
+    assert!(deroffer.do_tbl());
+    assert_eq!(deroffer.tblstate, TblState::Data);
+    assert_eq!(deroffer.s, "");
+    assert_eq!(deroffer.output.take(), "Hello\tWorld!");
+
+    // </Data>
+}
+
+#[test]
+fn test_spec() {
+    // I create new deroffers for each test to reset the shared state
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "\\(Sdaaaa".into(); // `ð`
+    assert!(deroffer.spec());
+    assert!(deroffer.specletter);
+    assert_eq!(deroffer.output.take(), "ð");
+    assert_eq!(deroffer.s, "aaaa");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "\\(miaaaa".into(); // `-`
+    assert!(deroffer.spec());
+    assert!(!deroffer.specletter);
+    assert_eq!(deroffer.output.take(), "-");
+    assert_eq!(deroffer.s, "aaaa");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "\\(aaaaaa".into();
+    assert!(deroffer.spec());
+    assert!(!deroffer.specletter);
+    assert!(deroffer.output.take().is_empty());
+    assert_eq!(deroffer.s, "aaaa");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "\\%asdasdasd".into();
+    assert!(deroffer.spec());
+    assert!(deroffer.specletter);
+    assert!(deroffer.output.take().is_empty());
+    assert_eq!(deroffer.s, "asdasdasd");
+
+    let mut deroffer = Deroffer::new();
+    deroffer.s = "Hello World!".into();
+    assert!(!deroffer.spec());
+    assert_eq!(deroffer.s, "Hello World!");
+    assert!(deroffer.output.take().is_empty());
 }
 
 #[test]
 fn test_get_output() {
     let deroffer = Deroffer::new();
-    assert_eq!(&deroffer.get_output(b"foo\n\nbar").unwrap(), "foo\n\nbar");
-    assert_eq!(&deroffer.get_output(b"foo\n\n\nbar").unwrap(), "foo\nbar");
+    deroffer.output.set("foo\n\nbar".to_string());
+    assert_eq!(&deroffer.get_output(), "foo\n\nbar");
+    deroffer.output.set("foo\n\n\nbar".to_string());
+    assert_eq!(&deroffer.get_output(), "foo\nbar");
 }
 
 #[test]
 fn test_not_whitespace() {
-    let mut d = Deroffer::new();
+    let mut deroffer = Deroffer::new();
 
-    assert_eq!(d.not_whitespace(0), false);
-    assert_eq!(d.not_whitespace(9), false);
-    d.s = "ab cd".to_owned();
-    assert_eq!(d.not_whitespace(2), false);
-    assert_eq!(d.not_whitespace(3), true);
+    deroffer.s = "".to_owned();
+    assert_eq!(deroffer.not_whitespace(0), false);
+    assert_eq!(deroffer.not_whitespace(9), false);
+
+    deroffer.s = "ab d".to_owned();
+    // idx 2 = " ", should be false
+    assert_eq!(deroffer.not_whitespace(2), false);
+    assert_eq!(deroffer.not_whitespace(3), true);
 }
 
 #[test]
 fn test_str_at() {
-    let mut d = Deroffer::new();
+    let mut deroffer = Deroffer::new();
 
-    // d.s == ""
-    assert_eq!(d.str_at(1), "");
+    assert_eq!(deroffer.str_at(1), "");
 
-    d.s = String::from("ab cd");
-    assert_eq!(d.str_at(42), "");
-    assert_eq!(d.str_at(1), "b");
+    deroffer.s = "ab cd".to_owned();
+    assert_eq!(deroffer.str_at(42), "");
+    assert_eq!(deroffer.str_at(1), "b");
 
-    d.s = String::from("🗻");
-    assert_eq!(d.str_at(0), "🗻");
-    assert_eq!(d.str_at(1), "");
+    deroffer.s = "🗻".to_owned();
+    assert_eq!(deroffer.str_at(0), "🗻");
+    assert_eq!(deroffer.str_at(1), "");
 }
 
 #[test]
 fn test_is_white() {
-    let mut d = Deroffer::new();
-    assert_eq!(d.is_white(1), false);
+    let mut deroffer = Deroffer::new();
 
-    d.s = "ab cd".to_owned();
-    assert_eq!(d.is_white(42), false); // OOB
-    assert_eq!(d.is_white(1), false); // "b"
-    assert_eq!(d.is_white(2), true); // " "
-    assert_eq!(d.is_white(3), false); // "c"
-}
+    assert_eq!(deroffer.is_white(1), false);
 
-#[test]
-fn test_condputs() {
-    let mut d = Deroffer::new();
-
-    assert_eq!(d.output, String::new());
-    d.condputs("Hello World!\n");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
-    d.pic = true;
-    d.condputs("This won't go to output");
-    assert_eq!(d.output, "Hello World!\n".to_owned());
-    d.pic = false;
-    d.condputs("This will go to output :)");
-    assert_eq!(
-        d.output,
-        "Hello World!\nThis will go to output :)".to_owned()
-    );
-
-    // Test the translation check
-    d.tr = TranslationTable::new("Ttr", "AAA").ok();
-    d.condputs("Translate test");
-    assert_eq!(
-        d.output,
-        "Hello World!\nThis will go to output :)AAanslaAe AesA".to_owned()
-    );
+    deroffer.s = "ab cd".to_owned();
+    assert_eq!(deroffer.is_white(42), false);
+    assert_eq!(deroffer.is_white(1), false);
+    assert_eq!(deroffer.is_white(2), true);
+    assert_eq!(deroffer.is_white(3), false);
 }
 
 #[test]
@@ -1250,829 +1701,182 @@ fn test_var() {
 
     // "\n" successes
     d.s = "\\n dyHello".to_owned();
-    assert!(d.var() == true);
-    assert!(d.s == "Hello");
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, "Hello");
 
     d.s = "\\n(aaHello".to_owned();
-    assert!(d.var() == true);
-    assert!(d.s == "Hello");
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, "Hello");
 
     d.s = "\\n[skipme] Hello".to_owned();
-    assert!(d.var() == true);
-    assert!(d.s == "] Hello");
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, "] Hello");
 
     d.s = "\\naHello".to_owned();
-    assert!(d.var() == true);
-    assert!(d.s == "Hello");
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, "Hello");
 
     // "\n" errors
     d.s = "\\n".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "\\n");
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "\\n");
 
     d.s = "\\n a".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "\\n a");
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "\\n a");
 
     d.s = "\\n da".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "\\n da");
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "\\n da");
 
     // "\*" successes
 
-    // these blocks are more for me to understand the code,
-    // but, I think they're probably helpful for you guys,
-    // so here they are. On another note, I cannot WAIT to
-    // reformat this entire project
-
-    /*
-    AA is two non whitespace characters
-    "\*(AA" => {
-        if AA in self.reg_table => {
-            self.s = self.reg_table.get(AA);
-            return true;
-        } else => {
-            self.s = self.s.get(5..);
-            return false;
-        }
-    } */
     d.s = "\\*(traaaaaaaaaaaaa".to_owned();
     d.reg_table
         .insert("tr".to_owned(), "Hello World!".to_owned());
-    assert!(d.var() == true);
-    assert!(d.s == "Hello World!");
-    // assert!(d.s == " World!");
-    // assert!(d.output.contains("Hello"))
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, " World!");
+    let o = d.output.take();
+    assert!(o.contains("Hello"));
+    d.output.set(o);
 
     d.s = "\\*(aaHello World!".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "Hello World!");
-
-    /*
-    A is a string that does not start with whitespace
-    "\*[A" => {
-        if A ends with "]" => {
-            let B = A[..-1];
-
-            if B in self.reg_table {
-                self.s = self.reg_table.get(B);
-                return true;
-            } else {
-                +1 to skip the "]" as well
-                self.s = self.s[len(B)+1..];
-                return false;
-            }
-        } else => {
-            self.s = "";
-            return false;
-        }
-    }
-    */
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "Hello World!");
 
     // ideal case, B is in reg_table
     d.s = "\\*[test_reg]".to_owned();
     d.reg_table
         .insert("test_reg".to_owned(), "It me!".to_owned());
-    assert!(d.var() == true);
-    assert!(d.s == "It me!");
-    // assert!(d.s == " me!");
-    // assert!(d.output.contains("It"));
+    assert_eq!(d.var(), true);
+    assert_eq!(d.s, " me!");
+    let o = d.output.take();
+    assert!(o.contains("It"));
+    d.output.set(o);
 
     // no "]"
     d.s = "\\*[foo bar :)".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "");
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "");
 
     // B not in reg_table
     d.s = "\\*[foo bar]abcd".to_owned();
-    assert!(d.var() == false);
-    assert!(d.s == "abcd");
-
-    // Here's a python version of these tests
-    /*
-        d.s = "\\n dyHello"
-        print(d.var() == True)
-        print(d.s == "Hello")
-
-        d.s = "\\n(aaHello"
-        print(d.var() == True)
-        print(d.s == "Hello")
-
-        d.s = "\\n[skipme] Hello"
-        print(d.var() == True)
-        print(d.s == "] Hello")
-
-        d.s = "\\naHello"
-        print(d.var() == True)
-        print(d.s == "Hello")
-
-        d.s = "\\n"
-        print(d.var() == False)
-        print(d.s == "\\n")
-
-        d.s = "\\n a"
-        print(d.var() == False)
-        print(d.s == "\\n a")
-
-        d.s = "\\n da"
-        print(d.var() == False)
-        print(d.s == "\\n da")
-
-        d.s = "\\*(traaaaaaaaaaaaa"
-        d.reg_table["tr"] = "Hello World!"
-        print(d.var() == True)
-        print(d.s == " World!")
-        print("Hello" in d.output)
-
-        d.s = "\\*(aaHello World!"
-        print(d.var() == False)
-        print(d.s == "Hello World!")
-
-        d.s = "\\*[test_reg]"
-        d.reg_table["test_reg"] = "It me!"
-        print(d.var() == True)
-        print(d.s == " me!")
-        print("It" in d.output)
-
-        d.s = "\\*[foo bar :)"
-        print(d.var() == False)
-        print(d.s == "")
-
-        d.s = "\\*[foo bar]abcd"
-        print(d.var() == False)
-        print(d.s == "abcd")
-
-        print(d.output)
-    */
+    assert_eq!(d.var(), false);
+    assert_eq!(d.s, "abcd");
 }
 
-//     def __init__(self):
-//         self.reg_table = {}
-//         self.tr_from = ''
-//         self.tr_to = ''
-//         self.tr = ''
-//         self.nls = 2
-//         self.specletter = False
-//         self.refer = False
-//         self.macro = 0
-//         self.nobody = False
-//         self.inlist = False
-//         self.inheader = False
-//         self.pic = False
-//         self.tbl = False
-//         self.tblstate = 0
-//         self.tblTab = ''
-//         self.eqn = False
-//         self.skipheaders = False
-//         self.skiplists = False
-//         self.ignore_sonx = False
-//         self.output = []
-//         self.name = ''
-//
-//         self.OPTIONS = 0
-//         self.FORMAT = 1
-//         self.DATA = 2
-//
-//         # words is uninteresting and should be treated as false
-//
-//     # This gets swapped in in place of condputs the first time tr gets modified
-//     def condputs_tr(self, str):
-//         special = self.pic or self.eqn or self.refer or self.macro or (self.skiplists and self.inlist) or (self.skipheaders and self.inheader)
-//         if not special:
-//             self.output.append(str.translate(self.tr))
+#[test]
+fn test_condputs() {
+    let mut d = Deroffer::new();
 
-//     def condputs(self, str):
-//         special = self.pic or self.eqn or self.refer or self.macro or (self.skiplists and self.inlist) or (self.skipheaders and self.inheader)
-//         if not special:
-//             self.output.append(str)
+    let o = d.output.take();
+    assert_eq!(o, String::new());
+    d.output.set(o);
 
-//     def str_eq(offset, other, len):
-//         return self.s[offset:offset+len] == other[:len]
+    d.condputs("Hello World!\n");
 
-//     def font(self):
-//         match = Deroffer.g_re_font.match(self.s)
-//         if not match: return False
-//         self.skip_char(match.end())
-//         return True
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
 
-//     def numreq(self):
-//         # We require that the string starts with backslash
-//         if self.str_at(1) in 'hvwud' and self.str_at(2) == '\'':
-//             self.macro += 1
-//             self.skip_char(3)
-//             while self.str_at(0) != '\'' and self.esc_char():
-//                 pass # Weird
-//             if self.str_at(0) == '\'':
-//                 self.skip_char()
-//             self.macro -= 1
-//             return True
-//         return False
+    d.pic = true;
+    d.condputs("This won't go to output");
 
-//     def var(self):
-//         reg = ''
-//         s0s1 = self.s[0:2]
-//         if s0s1 == '\\n':
-//             if self.s[3:5] == 'dy':
-//                 self.skip_char(5)
-//                 return True
-//             elif self.str_at(2) == '(' and self.not_whitespace(3) and self.not_whitespace(4):
-//                 self.skip_char(5)
-//                 return True
-//             elif self.str_at(2) == '[' and self.not_whitespace(3):
-//                 self.skip_char(3)
-//                 while self.str_at(0) and self.str_at(0) != ']':
-//                     self.skip_char()
-//                 return True
-//             elif self.not_whitespace(2):
-//                 self.skip_char(3)
-//                 return True
-//         elif s0s1 == '\\*':
-//             if self.str_at(2) == '(' and self.not_whitespace(3) and self.not_whitespace(4):
-//                 reg = self.s[3:5]
-//                 self.skip_char(5)
-//             elif self.str_at(2) == '[' and self.not_whitespace(3):
-//                 self.skip_char(3)
-//                 while self.str_at(0) and self.str_at(0) != ']':
-//                     reg = reg + self.str_at(0)
-//                     self.skip_char()
-//                 if self.s[0:1] == ']':
-//                     self.skip_char()
-//                 else:
-//                     return False
-//             elif self.not_whitespace(2):
-//                 reg = self.str_at(2)
-//                 self.skip_char(3)
-//             else:
-//                 return False
-//
-//             if reg in self.reg_table:
-//                 old_s = self.s
-//                 self.s = self.reg_table[reg]
-//                 self.text_arg()
-//                 return True
-//         return False
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\n".to_owned());
+    d.output.set(o);
 
-//     def size(self):
-//         # We require that the string starts with \s
-//         if self.digit(2) or (self.str_at(2) in '-+' and self.digit(3)):
-//             self.skip_char(3)
-//             while self.digit(0): self.skip_char()
-//             return True
-//         return False
+    d.pic = false;
+    d.condputs("This will go to output :)");
+    let o = d.output.take();
+    assert_eq!(o, "Hello World!\nThis will go to output :)".to_owned());
+    d.output.set(o);
 
-//     def spec(self):
-//         self.specletter = False
-//         if self.s[0:2] == '\\(' and self.not_whitespace(2) and self.not_whitespace(3):
-//             key = self.s[2:4]
-//             if key in Deroffer.g_specs_specletter:
-//                 self.condputs(Deroffer.g_specs_specletter[key])
-//                 self.specletter = True
-//             elif key in Deroffer.g_specs:
-//                 self.condputs(Deroffer.g_specs[key])
-//             self.skip_char(4)
-//             return True
-//         elif self.s.startswith('\\%'):
-//             self.specletter = True
-//             self.skip_char(2)
-//             return True
-//         else:
-//             return False
+    // Test the translation check
+    d.tr = TranslationTable::new("Ttr", "AAA").ok();
+    d.condputs("Translate test");
 
-//     def esc(self):
-//         # We require that the string start with backslash
-//         c = self.s[1:2]
-//         if not c: return False
-//         if c in 'eE':
-//             self.condputs('\\')
-//         elif c in 't':
-//             self.condputs('\t')
-//         elif c in '0~':
-//             self.condputs(' ')
-//         elif c in '|^&:':
-//             pass
-//         else:
-//             self.condputs(c)
-//         self.skip_char(2)
-//         return True
+    let o = d.output.take();
+    assert_eq!(
+        o,
+        "Hello World!\nThis will go to output :)AAanslaAe AesA".to_owned()
+    );
+    d.output.set(o);
+}
 
-//     def word(self):
-//         got_something = False
-//         while True:
-//             match = Deroffer.g_re_word.match(self.s)
-//             if not match: break
-//             got_something = True
-//             self.condputs(match.group(0))
-//             self.skip_char(match.end(0))
-//
-//             # Consume all specials
-//             while self.spec():
-//                 if not self.specletter: break
-//
-//         return got_something
+#[test]
+fn test_digit() {
+    let mut deroffer = Deroffer::new();
 
-//     def text(self):
-//         while True:
-//             idx = self.s.find('\\')
-//             if idx == -1:
-//                 self.condputs(self.s)
-//                 self.s = ''
-//                 break
-//             else:
-//                 self.condputs(self.s[:idx])
-//                 self.skip_char(idx)
-//                 if not self.esc_char_backslash():
-//                     self.condputs(self.str_at(0))
-//                     self.skip_char()
-//         return True
+    deroffer.s = "0".to_owned();
+    assert_eq!(deroffer.digit(0), true);
 
-//     def number(self):
-//         match = Deroffer.g_re_number.match(self.s)
-//         if not match:
-//             return False
-//         else:
-//             self.condputs(match.group(0))
-//             self.skip_char(match.end())
-//             return True
+    deroffer.s = "9".to_owned();
+    assert_eq!(deroffer.digit(0), true);
 
-//     def esc_char_backslash(self):
-//         # Like esc_char, but we know the string starts with a backslash
-//         c = self.s[1:2]
-//         if c == '"':
-//             return self.comment()
-//         elif c == 'f':
-//             return self.font()
-//         elif c == 's':
-//             return self.size()
-//         elif c in 'hvwud':
-//             return self.numreq()
-//         elif c in 'n*':
-//             return self.var()
-//         elif c == '(':
-//             return self.spec()
-//         else:
-//             return self.esc()
+    deroffer.s = "".to_owned();
+    assert_eq!(deroffer.digit(1), false);
 
-//     def esc_char(self):
-//         if self.s[0:1] == '\\':
-//             return self.esc_char_backslash()
-//         return self.word() or self.number()
+    deroffer.s = "1".to_owned();
+    assert_eq!(deroffer.digit(1), false);
 
-//     def quoted_arg(self):
-//         if self.str_at(0) == '"':
-//             self.skip_char()
-//             while self.s and self.str_at(0) != '"':
-//                 if not self.esc_char():
-//                     if self.s:
-//                         self.condputs(self.str_at(0))
-//                         self.skip_char()
-//             return True
-//         else:
-//             return False
+    deroffer.s = "a".to_owned();
+    assert_eq!(deroffer.digit(0), false);
 
-//     def text_arg(self):
-//         # PCA: The deroff.c textArg() disallowed quotes at the start of an argument
-//         # I'm not sure if this was a bug or not
-//         got_something = False
-//         while True:
-//             match = Deroffer.g_re_not_backslash_or_whitespace.match(self.s)
-//             if match:
-//                 # Output the characters in the match
-//                 self.condputs(match.group(0))
-//                 self.skip_char(match.end(0))
-//                 got_something = True
-//
-//             # Next is either an escape, or whitespace, or the end
-//             # If it's the whitespace or the end, we're done
-//             if not self.s or self.is_white(0):
-//                 return got_something
-//
-//             # Try an escape
-//             if not self.esc_char():
-//                 # Some busted escape? Just output it
-//                 self.condputs(self.str_at(0))
-//                 self.skip_char()
-//                 got_something = True
+    deroffer.s = " ".to_owned();
+    assert_eq!(deroffer.digit(0), false);
+}
 
-//     def text_arg2(self):
-//         if not self.esc_char():
-//             if self.s and not self.is_white(0):
-//                 self.condputs(self.str_at(0))
-//                 self.skip_char()
-//             else:
-//                 return False
-//         while True:
-//             if not self.esc_char():
-//                 if self.s and not self.is_white(0):
-//                     self.condputs(self.str_at(0))
-//                     self.skip_char()
-//                 else:
-//                     return True
+#[test]
+fn test_skip_char() {
+    let mut d = Deroffer::new();
+    d.s = String::from("      Hello         World");
+    d.skip_char(6);
+    assert_eq!(&d.s, "Hello         World");
+    d.skip_char(5);
+    assert_eq!(&d.s, "         World");
+    d.skip_char(9);
+    assert_eq!(&d.s, "World");
+    d.skip_char(5);
+    assert_eq!(&d.s, "");
+}
 
-//     # Macro functions
-//     def macro_sh(self):
-//         for header_str in [' SYNOPSIS', ' "SYNOPSIS', ' ‹BERSICHT', ' "‹BERSICHT']:
-//             if self.s[2:].startswith(header_str):
-//                 self.inheader = True
-//                 break
-//         else:
-//             # Did not find a header string
-//             self.inheader = False
-//             self.nobody = True
+#[test]
+fn test_skip_leading_whitespace() {
+    let mut d = Deroffer::new();
+    d.s = String::from("          Hello        World");
+    d.skip_leading_whitespace();
+    assert_eq!(&d.s, "Hello        World");
+    d.skip_char(5);
+    assert_eq!(&d.s, "        World");
+    d.skip_leading_whitespace();
+    assert_eq!(&d.s, "World");
+    d.skip_leading_whitespace();
+    assert_eq!(&d.s, "World");
+}
 
-//     def macro_ss_ip(self):
-//         self.nobody = True
-//         return False
+#[test]
+fn test_number() {
+    let mut d = Deroffer::new();
 
-//     def macro_i_ir(self):
-//         pass
-//         return False
+    d.s = String::from("4343xx7");
+    assert_eq!(d.number(), true);
+    let o = d.output.take();
+    assert_eq!(o, "4343".to_string());
+    d.output.set(o);
 
-//     def macro_nm(self):
-//         if self.s == 'Nm\n':
-//             self.condputs(self.name)
-//         else:
-//             self.name = self.s[3:].strip() + ' '
-//         return True
+    d.s = String::from("__23");
+    assert_eq!(d.number(), false);
 
-//     def macro_close_bracket(self):
-//         self.refer = False
-//         return False
+    d.s = String::from("-18.5");
+    assert_eq!(d.number(), true);
+    let o = d.output.take();
+    assert_eq!(o, "4343-18".to_string());
+    d.output.set(o);
 
-//     def macro_ps(self):
-//         if self.is_white(2): self.pic = True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_pe(self):
-//         if self.is_white(2): self.pic = False
-//         self.condputs('\n')
-//         return True
-
-//     def macro_ts(self):
-//         if self.is_white(2): self.tbl, self.tblstate = True, self.OPTIONS
-//         self.condputs('\n')
-//         return True
-
-//     def macro_t_and(self):
-//         if self.is_white(2): self.tbl, self.tblstate = True, self.FORMAT
-//         self.condputs('\n')
-//         return True
-
-//     def macro_te(self):
-//         if self.is_white(2): self.tbl = False
-//         self.condputs('\n')
-//         return True
-
-//     def macro_eq(self):
-//         if self.is_white(2): self.eqn = True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_en(self):
-//         if self.is_white(2): self.eqn = False
-//         self.condputs('\n')
-//         return True
-
-//     def macro_r1(self):
-//         if self.is_white(2): self.refer2 = True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_r2(self):
-//         if self.is_white(2): self.refer2 = False
-//         self.condputs('\n')
-//         return True
-
-//     def macro_de(self):
-//         macro=True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_bl_vl(self):
-//         if self.is_white(2): self.inlist = True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_bv(self):
-//         if self.str_at(2) == 'L' and self.white(self.str_at(3)): self.inlist = True
-//         self.condputs('\n')
-//         return True
-
-//     def macro_le(self):
-//         if self.is_white(2): self.inlist = False
-//         self.condputs('\n')
-//         return True
-
-//     def macro_lp_pp(self):
-//         self.condputs('\n')
-//         return True
-
-//     def macro_ds(self):
-//         self.skip_char(2)
-//         self.skip_leading_whitespace()
-//         if self.str_at(0):
-//             # Split at whitespace
-//             comps = self.s.split(None, 2)
-//             if len(comps) is 2:
-//                 name, value = comps
-//                 value = value.rstrip()
-//                 self.reg_table[name] = value
-//         self.condputs('\n')
-//         return True
-
-//     def macro_so_nx(self):
-//         # We always ignore include directives
-//         # deroff.c for some reason allowed this to fall through to the 'tr' case
-//         # I think that was just a bug so I won't replicate it
-//         return True
-
-//     def macro_tr(self):
-//         self.skip_char(2)
-//         self.skip_leading_whitespace()
-//         while self.s and self.str_at(0) != '\n':
-//             c = self.str_at(0)
-//             ns = self.str_at(1)
-//             self.skip_char(2)
-//             if not ns or ns == '\n': ns = ' '
-//             self.tr_from += c
-//             self.tr_to += ns
-//
-//         # Update our table, then swap in the slower tr-savvy condputs
-//         try: #Python2
-//             self.tr = string.maketrans(self.tr_from, self.tr_to)
-//         except AttributeError: #Python3
-//             self.tr = "".maketrans(self.tr_from, self.tr_to)
-//         self.condputs = self.condputs_tr
-//         return True
-
-//     def macro_sp(self):
-//         self.condputs('\n')
-//         return True
-
-//     def macro_other(self):
-//         self.condputs('\n')
-//         return True
-
-//     def request_or_macro(self):
-//         # s[0] is period or open single quote
-//         self.skip_char()
-//         s0 = self.s[1:2]
-//         if s0 == '\\':
-//             if self.str_at(1) == '"':
-//                 self.condputs('\n')
-//                 return True
-//             else:
-//                 pass
-//         elif s0 == '[':
-//             self.refer = True
-//             self.condputs('\n')
-//             return True
-//         elif s0 == ']':
-//             self.refer = False
-//             self.skip_char()
-//             return self.text()
-//         elif s0 == '.':
-//             self.macro = False
-//             self.condputs('\n')
-//             return True
-//
-//         self.nobody = False
-//         s0s1 = self.s[0:2]
-//
-// RUST NOTE: use Deroffer.g_macro_dispatch(s0s1) which will return like macro_func does below
-//         macro_func = Deroffer.g_macro_dict.get(s0s1, Deroffer.macro_other)
-//         if macro_func(self):
-//             return True
-//
-//         if self.skipheaders and self.nobody: return True
-//
-//         self.skip_leading_whitespace()
-//         while self.s and not self.is_white(0): self.skip_char()
-//         self.skip_leading_whitespace()
-//         while True:
-//             if not self.quoted_arg() and not self.text_arg():
-//                 if self.s:
-//                     self.condputs(self.str_at(0))
-//                     self.skip_char()
-//                 else:
-//                     return True
-
-//     def request_or_macro2(self):
-//         self.skip_char()
-//         s0 = self.s[0:1]
-//         if s0 == '\\':
-//             if self.str_at(1) == '"':
-//                 self.condputs('\n')
-//                 return True
-//             else:
-//                 pass
-//         elif s0 == '[':
-//             self.refer = True
-//             self.condputs('\n')
-//             return True
-//         elif s0 == ']':
-//             self.refer = False
-//             self.skip_char()
-//             return self.text()
-//         elif s0 == '.':
-//             self.macro = False
-//             self.condputs('\n')
-//             return True
-//
-//         self.nobody = False
-//         s0s1 = self.s[0:2]
-//         if s0s1 == 'SH':
-//             for header_str in [' SYNOPSIS', ' "SYNOPSIS', ' ‹BERSICHT', ' "‹BERSICHT']:
-//                 if self.s[2:].startswith(header_str):
-//                     self.inheader = True
-//                     break
-//             else:
-//                 # Did not find a header string
-//                 self.inheader = False
-//                 self.nobody = True
-//         elif s0s1 in ['SS', 'IP', 'H ']:
-//             self.nobody = True
-//         elif s0s1 in ['I ', 'IR', 'IB', 'B ', 'BR', 'BI', 'R ', 'RB', 'RI', 'AB']:
-//             pass
-//         elif s0s1 in ['] ']:
-//             self.refer = False
-//         elif s0s1 in ['PS']:
-//             if self.is_white(2): self.pic = True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['PE']:
-//             if self.is_white(2): self.pic = False
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['TS']:
-//             if self.is_white(2): self.tbl, self.tblstate = True, self.OPTIONS
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['T&']:
-//             if self.is_white(2): self.tbl, self.tblstate = True, self.FORMAT
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['TE']:
-//             if self.is_white(2): self.tbl = False
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['EQ']:
-//             if self.is_white(2): self.eqn = True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['EN']:
-//             if self.is_white(2): self.eqn = False
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['R1']:
-//             if self.is_white(2): self.refer2 = True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['R2']:
-//             if self.is_white(2): self.refer2 = False
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['de']:
-//             macro=True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['BL', 'VL', 'AL', 'LB', 'RL', 'ML', 'DL']:
-//             if self.is_white(2): self.inlist = True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['BV']:
-//             if self.str_at(2) == 'L' and self.white(self.str_at(3)): self.inlist = True
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['LE']:
-//             if self.is_white(2): self.inlist = False
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['LP', 'PP', 'P\n']:
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['ds']:
-//             self.skip_char(2)
-//             self.skip_leading_whitespace()
-//             if self.str_at(0):
-//                 # Split at whitespace
-//                 comps = self.s.split(None, 2)
-//                 if len(comps) is 2:
-//                     name, value = comps
-//                     value = value.rstrip()
-//                     self.reg_table[name] = value
-//             self.condputs('\n')
-//             return True
-//         elif s0s1 in ['so', 'nx']:
-//             # We always ignore include directives
-//             # deroff.c for some reason allowed this to fall through to the 'tr' case
-//             # I think that was just a bug so I won't replicate it
-//             return True
-//         elif s0s1 in ['tr']:
-//             self.skip_char(2)
-//             self.skip_leading_whitespace()
-//             while self.s and self.str_at(0) != '\n':
-//                 c = self.str_at(0)
-//                 ns = self.str_at(1)
-//                 self.skip_char(2)
-//                 if not ns or ns == '\n': ns = ' '
-//                 self.tr_from += c
-//                 self.tr_to += ns
-//
-//             # Update our table, then swap in the slower tr-savvy condputs
-//             try: #Python2
-//                 self.tr = string.maketrans(self.tr_from, self.tr_to)
-//             except AttributeError: #Python3
-//                 self.tr = "".maketrans(self.tr_from, self.tr_to)
-//             self.condputs = self.condputs_tr
-//
-//             return True
-//         elif s0s1 in ['sp']:
-//             self.condputs('\n')
-//             return True
-//         else:
-//             self.condputs('\n')
-//             return True
-//
-//         if self.skipheaders and self.nobody: return True
-//
-//         self.skip_leading_whitespace()
-//         while self.s and not self.is_white(0): self.skip_char()
-//         self.skip_leading_whitespace()
-//         while True:
-//             if not self.quoted_arg() and not self.text_arg():
-//                 if self.s:
-//                     self.condputs(self.str_at(0))
-//                     self.skip_char()
-//                 else:
-//                     return True
-
-//     def do_tbl(self):
-//         if self.tblstate == self.OPTIONS:
-//             while self.s and self.str_at(0) != ';' and self.str_at(0) != '\n':
-//                 self.skip_leading_whitespace()
-//                 if not self.str_at(0).isalpha():
-//                     # deroff.c has a bug where it can loop forever here...we try to work around it
-//                     self.skip_char()
-//                 else: # Parse option
-//
-//                     option = self.s
-//                     arg = ''
-//
-//                     idx = 0
-//                     while option[idx:idx+1].isalpha():
-//                         idx += 1
-//
-//                     if option[idx:idx+1] == '(':
-//                         option = option[:idx]
-//                         self.s = self.s[idx+1:]
-//                         arg = self.s
-//                     else:
-//                         self.s = ''
-//
-//                     if arg:
-//                         idx = arg.find(')')
-//                         if idx != -1:
-//                             arg = arg[:idx]
-//                         self.s = self.s[idx+1:]
-//                     else:
-//                         #self.skip_char()
-//                         pass
-//
-//                     if option.lower() == 'tab':
-//                         self.tblTab = arg[0:1]
-//
-//             self.tblstate = self.FORMAT
-//             self.condputs('\n')
-//
-//         elif self.tblstate == self.FORMAT:
-//             while self.s and self.str_at(0) != '.' and self.str_at(0) != '\n':
-//                 self.skip_leading_whitespace()
-//                 if self.str_at(0): self.skip_char()
-//
-//             if self.str_at(0) == '.': self.tblstate = self.DATA
-//             self.condputs('\n')
-//         elif self.tblstate == self.DATA:
-//             if self.tblTab:
-//                 self.s = self.s.replace(self.tblTab, '\t')
-//             self.text()
-//         return True
-
-//     def do_line(self):
-//         if self.s[0:1] in ".'":
-//             if not self.request_or_macro(): return False
-//         elif self.tbl:
-//             self.do_tbl()
-//         else:
-//             self.text()
-//         return True
-
-//     def deroff(self, str):
-//         lines = str.split('\n')
-//         for line in lines:
-//             self.s = line + '\n'
-//             if not self.do_line():
-//                 break
+    d.s = String::from("+078t");
+    assert_eq!(d.number(), true);
+}
 
 // if __name__ == "__main__":
 //     import gzip
