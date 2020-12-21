@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
 
-const SKIP_LISTS: bool = false;
 const SKIP_HEADERS: bool = false;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -41,7 +40,7 @@ pub struct Deroffer {
     pic: bool,
     tbl: bool,
     tblstate: TblState,
-    tblTab: String,
+    tbl_tab: String,
     eqn: bool,
     output: Cell<String>,
     skipheaders: bool,
@@ -80,7 +79,7 @@ impl Deroffer {
             pic: false,
             tbl: false,
             tblstate: TblState::Options,
-            tblTab: String::new(),
+            tbl_tab: String::new(),
             eqn: false,
             output: Cell::new(String::new()),
             skipheaders: false,
@@ -423,7 +422,8 @@ impl Deroffer {
             if let Some(m) = possible {
                 // Output the characters in the match
                 self.condputs(m.as_str());
-                self.skip_char(m.end());
+                let end = m.end();
+                self.skip_char(end);
                 got_something = true;
             }
 
@@ -442,7 +442,7 @@ impl Deroffer {
     // Replaces the g_macro_dict lookup in the Python code
     fn g_macro_dispatch(&mut self, s: &str) -> bool {
         match s {
-            "SH" => self.macro_sh(s),
+            "SH" => self.macro_sh(),
             "SS" => self.macro_ss_ip(),
             "IP" => self.macro_ss_ip(),
             "H " => self.macro_ss_ip(),
@@ -458,7 +458,7 @@ impl Deroffer {
             "AB" => self.macro_i_ir(),
             "Nm" => self.macro_nm(),
             "] " => self.macro_close_bracket(),
-            "PS" => self.macro_ps(s),
+            "PS" => self.macro_ps(),
             "PE" => self.macro_pe(),
             "TS" => self.macro_ts(),
             "T&" => self.macro_t_and(),
@@ -489,10 +489,10 @@ impl Deroffer {
         }
     }
 
-    fn macro_sh(&mut self, s: &str) -> bool {
+    fn macro_sh(&mut self) -> bool {
         let headers = [" SYNOPSIS", " \"SYNOPSIS", " ‹BERSICHT", " \"‹BERSICHT"];
         // @TODO: In the future s[2..] should care about UTF-8
-        if headers.iter().any(|header| s[2..].starts_with(header)) {
+        if headers.iter().any(|header| self.s[2..].starts_with(header)) {
             self.inheader = true;
         } else {
             self.inheader = false;
@@ -525,7 +525,7 @@ impl Deroffer {
         false
     }
 
-    fn macro_ps(&mut self, s: &str) -> bool {
+    fn macro_ps(&mut self) -> bool {
         if self.is_white(2) {
             self.pic = true;
         }
@@ -761,7 +761,8 @@ impl Deroffer {
 
     fn font(&mut self) -> bool {
         if let Some(m) = self.g_re_font.find(&self.s) {
-            self.skip_char(m.end());
+            let end = m.end();
+            self.skip_char(end);
             true
         } else {
             false
@@ -889,7 +890,8 @@ impl Deroffer {
         while let Some(m) = self.g_re_word.find(&self.s) {
             got_something = true;
             self.condputs(m.as_str());
-            self.skip_char(m.end());
+            let end = m.end();
+            self.skip_char(end);
 
             while self.spec() {
                 if !self.specletter {
@@ -998,7 +1000,8 @@ impl Deroffer {
     fn number(&mut self) -> bool {
         if let Some(mat) = self.g_re_number.find(&self.s) {
             self.condputs(mat.as_str());
-            self.skip_char(mat.end());
+            let end = mat.end();
+            self.skip_char(end);
             true
         } else {
             false
@@ -1056,7 +1059,7 @@ impl Deroffer {
                                 let rest = iter.next().unwrap_or_default();
 
                                 if option.to_lowercase() == "tab" {
-                                    self.tblTab =
+                                    self.tbl_tab =
                                         arg.chars().next().unwrap_or_default().to_string();
                                 }
 
@@ -1083,8 +1086,8 @@ impl Deroffer {
                 self.condputs("\n");
             }
             TblState::Data => {
-                if !self.tblTab.is_empty() {
-                    self.s = self.s.replace(&self.tblTab, "\t");
+                if !self.tbl_tab.is_empty() {
+                    self.s = self.s.replace(&self.tbl_tab, "\t");
                 }
 
                 self.text();
@@ -1440,7 +1443,7 @@ fn test_do_line() {
     // same, to_tbl
     deroffer.s = "aaa(bbb);Hello World!".into();
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert_eq!(deroffer.s, ";Hello World!");
     assert_eq!(deroffer.output.take(), "\n");
     assert_eq!(deroffer.tblstate, TblState::Format);
@@ -1703,7 +1706,7 @@ fn test_do_tbl() {
 
     deroffer.s = "aaa(bbb);Hello World!".into();
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert_eq!(deroffer.s, ";Hello World!");
     assert_eq!(deroffer.output.take(), "\n");
     assert_eq!(deroffer.tblstate, TblState::Format);
@@ -1712,7 +1715,7 @@ fn test_do_tbl() {
     deroffer.tblstate = TblState::Options;
     deroffer.s = "aaa(bbb;Hello World!".into();
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert!(deroffer.s.is_empty());
     assert_eq!(deroffer.tblstate, TblState::Format);
 
@@ -1720,7 +1723,7 @@ fn test_do_tbl() {
     deroffer.tblstate = TblState::Options;
     deroffer.s = ";".into();
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert_eq!(deroffer.s, ";");
     assert_eq!(deroffer.tblstate, TblState::Format);
 
@@ -1728,21 +1731,21 @@ fn test_do_tbl() {
     deroffer.tblstate = TblState::Options;
     deroffer.s = "\n".into();
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert_eq!(deroffer.s, "\n");
     assert_eq!(deroffer.tblstate, TblState::Format);
 
     let mut deroffer = Deroffer::new();
     deroffer.tblstate = TblState::Options;
     assert!(deroffer.do_tbl());
-    assert!(deroffer.tblTab.is_empty());
+    assert!(deroffer.tbl_tab.is_empty());
     assert!(deroffer.s.is_empty());
 
     let mut deroffer = Deroffer::new();
     deroffer.tblstate = TblState::Options;
     deroffer.s = "Tab(arg);".into();
     assert!(deroffer.do_tbl());
-    assert_eq!(deroffer.tblTab, "a");
+    assert_eq!(deroffer.tbl_tab, "a");
     assert_eq!(deroffer.s, ";");
     assert_eq!(deroffer.tblstate, TblState::Format);
 
@@ -1795,7 +1798,7 @@ fn test_do_tbl() {
 
     let mut deroffer = Deroffer::new();
     deroffer.tblstate = TblState::Data;
-    deroffer.tblTab = "a".into();
+    deroffer.tbl_tab = "a".into();
 
     deroffer.s = "HelloaWorld!".into();
     assert!(deroffer.do_tbl());
@@ -1966,6 +1969,7 @@ fn test_var() {
     assert_eq!(d.s, "abcd");
 }
 
+#[test]
 fn test_condputs() {
     let mut d = Deroffer::new();
 
